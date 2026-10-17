@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: "NRT";
-  src: url("assets/fonts/NRT-Regular.ttf") format("truetype");
+  src: url("/assets/fonts/NRT-Regular.ttf") format("truetype");
   font-display: swap;
   font-style: normal;
   font-weight: 400;
@@ -10,7 +10,7 @@
 
 @font-face {
   font-family: "NRT";
-  src: url("assets/fonts/NRT-Bold.ttf") format("truetype");
+  src: url("/assets/fonts/NRT-Bold.ttf") format("truetype");
   font-display: swap;
   font-style: normal;
   font-weight: 700;
@@ -31,7 +31,7 @@
 *::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 [hidden] { display: none !important; }
 html { width: 100%; height: 100%; overflow: hidden; scroll-behavior: smooth; }
-body { width: 100%; height: 100%; margin: 0; min-width: 0; overflow: hidden; color: var(--ink); font-family: "NRT", "Noto Sans Arabic", Tahoma, Arial, sans-serif; font-weight: 400; background: #fbfbfd url("assets/soft-pattern.png") center / cover fixed no-repeat; }
+body { width: 100%; height: 100%; margin: 0; min-width: 0; overflow: hidden; color: var(--ink); font-family: "NRT", "Noto Sans Arabic", Tahoma, Arial, sans-serif; font-weight: 400; background: #fbfbfd url("/assets/soft-pattern.png") center / cover fixed no-repeat; }
 button, input, textarea, select { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 a { color: inherit; text-decoration: none; }
@@ -105,7 +105,7 @@ main { width: 100%; min-height: 0; flex: 1; padding: 0 clamp(20px, 5vw, 80px) cl
 .empty-state { display: none; color: var(--muted); text-align: center; }
 .empty-state.visible { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
 
-.app-screen { width: 100%; height: 100vh; height: 100dvh; overflow: hidden; color: var(--ink); background: #fbfbfd url("assets/soft-pattern.png") center / cover fixed no-repeat; }
+.app-screen { width: 100%; height: 100vh; height: 100dvh; overflow: hidden; color: var(--ink); background: #fbfbfd url("/assets/soft-pattern.png") center / cover fixed no-repeat; }
 .module-page-topbar { height: 74px; padding: 0 clamp(18px, 3vw, 46px); display: flex; align-items: center; justify-content: flex-start; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.72); backdrop-filter: blur(12px); }
 .back-dashboard { height: 44px; padding: 0 17px; display: inline-flex; align-items: center; gap: 9px; color: var(--brand); background: rgba(255,255,255,.72); border: 1px solid var(--line); border-radius: 3px; cursor: pointer; transition: border-color .18s ease, background-color .18s ease; }
 .back-dashboard:hover { background: white; border-color: rgba(57,32,95,.26); }
@@ -254,7 +254,7 @@ main { width: 100%; min-height: 0; flex: 1; padding: 0 clamp(20px, 5vw, 80px) cl
 .kit-print-note { margin-top:22px; padding-top:14px; display:flex; align-items:center; gap:8px; border-top:1px solid rgba(57,32,95,.08); }.kit-print-note > span:last-child { display:flex; flex-direction:column; }.kit-print-note strong { font-size:9px; }.kit-print-note small { margin-top:2px; color:#99919f; font-family:Arial,sans-serif; font-size:7px; direction:ltr; }
 .canvas-panel-scrim { display:none; }
 
-.generic-module-screen { background: #fbfbfd url("assets/soft-pattern.png") center / cover no-repeat; }
+.generic-module-screen { background: #fbfbfd url("/assets/soft-pattern.png") center / cover no-repeat; }
 .generic-module-body { height: calc(100dvh - 74px); display: grid; place-items: center; padding: 24px; }
 .generic-module-card { width: min(460px, 100%); padding: 56px 28px; text-align: center; background: rgba(255,255,255,.82); border: 1px solid var(--line); border-radius: 4px; box-shadow: var(--shadow); }
 .generic-large-icon { width: 64px; height: 64px; margin: 0 auto 18px; display: grid; place-items: center; color: var(--brand); border: 1px solid rgba(57,32,95,.18); border-radius: 50%; }
@@ -1514,7 +1514,7 @@ main { width: 100%; min-height: 0; flex: 1; padding: 0 clamp(20px, 5vw, 80px) cl
   inset:auto;
   padding:0;
   display:block;
-  background:#f8f7fa url("assets/soft-pattern.png") center / cover fixed no-repeat;
+  background:#f8f7fa url("/assets/soft-pattern.png") center / cover fixed no-repeat;
   backdrop-filter:none;
 }
 .order-create-screen .order-form {

@@ -1,0 +1,8 @@
+{
+  "name": "سیستەمی چاپی نەخش - Naxsh System",
+  "description": "سیستەمی بەڕێوەبردنی چاپخانەی نەخش، بە دیزاینی RTL و فۆنتی کوردی NRT",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
