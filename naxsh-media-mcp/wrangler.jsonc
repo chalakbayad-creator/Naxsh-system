@@ -8,6 +8,8 @@
   // Free storage (no payment method needed). To use R2 instead, add an r2_buckets binding named FILES.
   "kv_namespaces": [{ "binding": "STORE", "id": "959337ede20a4f8fab5df3ffc8548743" }],
   "observability": { "enabled": true },
+  "durable_objects": { "bindings": [{ "name": "JOBS", "class_name": "Jobs" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Jobs"] }],
   "vars": {
     "ADMIN_USERS": "akar",
     "DAILY_IMAGE_LIMIT": "60",

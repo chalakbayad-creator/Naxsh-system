@@ -16,12 +16,13 @@ The `naxsh-media` MCP server gives Claude two paid services: **Google Gemini** f
 ## Transcription (`transcribe`)
 Accuracy matters more than speed. ALWAYS use the `transcribe` tool; never transcribe with another tool, a local model (Whisper) or by guessing.
 1. Extract the audio: `ffmpeg -i video.mp4 -vn -ac 1 -ar 16000 -c:a flac audio.flac`.
-2. Up to ~3 min: send it as one file. Longer: split at silences into chunks of 2–3 min (`silencedetect`, then `-ss/-to`), transcribe each with `offset_seconds` = chunk start, and join the SRTs (renumber). Short chunks give the best words and timing, and each call stays within the tool time limit (~2 min per 1 min of audio in best mode).
-3. Always pass `languages` (`ckb` Sorani, `kmr` Kurmanji, `ar`, `fa`, `en`; several if mixed), a `glossary` of names/brands/places/terms written EXACTLY as they must appear on screen (in Kurdish script if the subtitles are Kurdish, e.g. «لارۆش»; Latin only if that is wanted), and a short `context`.
-4. Keep the default `quality: "best"`: two models transcribe independently, Google's speech recognizer adds timing, and a final editor pass listens again and decides every disputed word. Use `quality: "standard"` only if the user asks for speed.
-5. `speakers: true` only if there is more than one speaker.
-6. Show the result to the user as it came back. Do NOT rewrite, "improve" or re-phrase the transcript yourself; you cannot hear the audio. Only point out words that look doubtful and ask.
-7. Save as `transcript.srt` in the project folder and send it.
+2. `transcribe` starts a background job and returns a `job_id` at once. Then call `transcribe_result(job_id)` again and again (each call waits ~40 s) until it returns the SRT. Best quality takes about 2–3 minutes per minute of audio; that is normal. Tell the user once that it is working, then keep polling; never give up or switch to another method while the status is `running`.
+3. Up to ~4 min of audio: send it as one file. Longer: split at silences into chunks of 3–4 min (`silencedetect`, then `-ss/-to`), start a job for every chunk with `offset_seconds` = chunk start, poll each job, then join the SRTs in order (renumber).
+4. Always pass `languages` (`ckb` Sorani, `kmr` Kurmanji, `ar`, `fa`, `en`; several if mixed), a `glossary` of names/brands/places/terms written EXACTLY as they must appear on screen (in Kurdish script if the subtitles are Kurdish, e.g. «لارۆش»; Latin only if that is wanted), and a short `context`.
+5. Keep the default `quality: "best"`: two models transcribe independently, Google's speech recognizer adds timing, and a final editor pass listens again and decides every disputed word. Use `quality: "standard"` only if the user asks for speed.
+6. `speakers: true` only if there is more than one speaker.
+7. Show the result to the user as it came back. Do NOT rewrite, "improve" or re-phrase the transcript yourself; you cannot hear the audio. Only point out words that look doubtful and ask.
+8. Save as `transcript.srt` in the project folder and send it.
 
 ## Why style drifts with an API, and how to keep it
 In a ChatGPT chat, earlier images stay in the conversation, so the model sees the approved look. **Each API call starts from nothing.** The fix: send the approved designs as **reference images** on every call.

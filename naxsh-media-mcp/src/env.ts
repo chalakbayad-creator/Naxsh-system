@@ -2,6 +2,8 @@ export interface Env {
   /** Storage: uploaded files, generated images, transcripts, saved styles, usage counters.
    *  Either an R2 bucket binding, or built at runtime from the STORE KV namespace. */
   FILES: R2Bucket;
+  /** Durable Object namespace that runs long jobs (transcription) in the background. */
+  JOBS?: DurableObjectNamespace;
   /** KV namespace used when no R2 bucket is bound (free accounts). */
   STORE?: KVNamespace;
 

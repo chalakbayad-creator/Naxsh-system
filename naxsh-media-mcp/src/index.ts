@@ -3,6 +3,7 @@ import { tokenFromRequest, userForToken } from "./auth";
 import type { Ctx, Env } from "./env";
 import { buildServer } from "./server";
 import { handleDashboard } from "./dashboard";
+export { Jobs } from "./jobs";
 import { kvBucket } from "./kvstore";
 import { handleSetup, withSavedKeys } from "./setup";
 import { handleFile, handleUpload } from "./storage";

@@ -12,6 +12,7 @@ import {
   type Segment,
   type TranscribeOptions,
 } from "./gemini";
+import { jobStatus, startTranscriptionJob } from "./jobs";
 import { logImageEnd, logImageStart, logTranscription } from "./log";
 import { createImageTask, getImageTask, IMAGE_MODELS, waitForImage, type ImageVersion, type TaskResult } from "./kie";
 import {
@@ -132,7 +133,7 @@ function describeResult(r: TaskResult, task_id: string, extra: Record<string, un
     status: "still_working",
     task_id,
     ...extra,
-    next: "Call image_result with this task_id (it waits up to ~50 s). GPT Image usually takes 30–120 s.",
+    next: "Call image_result with this task_id (it waits up to ~45 s). GPT Image usually takes 30–120 s.",
   };
 }
 
@@ -261,7 +262,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     .string()
     .optional()
     .describe("Project name for the cost dashboard (defaults to the style name, else 'general'). Use the same name for all work of one project.");
-  const wait = z.number().int().min(0).max(55).optional().describe("Seconds to wait for the result in this call (default 50).");
+  const wait = z.number().int().min(0).max(45).optional().describe("Seconds to wait for the result in this call (default 35; keep under 45 — clients stop waiting at ~60 s).");
 
   server.registerTool(
     "image_generate",
@@ -309,7 +310,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         before: t.credits_before,
         after: t.credits_after,
       });
-      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50));
+      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 35));
       return describeResult(r, t.task_id, { model: t.model, references_sent: job.urls.length });
     }),
   );
@@ -364,7 +365,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         before: t.credits_before,
         after: t.credits_after,
       });
-      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50));
+      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 35));
       return describeResult(r, t.task_id, { model: t.model, references_sent: job.urls.length });
     }),
   );
@@ -373,13 +374,13 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     "image_result",
     {
       title: "Get an image result",
-      description: "Waits for (up to ~50 s) and returns the result of an image task started by image_generate or image_edit.",
+      description: "Waits for (up to ~45 s) and returns the result of an image task started by image_generate or image_edit.",
       inputSchema: { task_id: z.string(), wait_seconds: wait },
     },
     wrap(async ({ task_id, wait_seconds }) => {
       const r = await finish(
         task_id,
-        wait_seconds === 0 ? await getImageTask(ctx, task_id) : await waitForImage(ctx, task_id, wait_seconds ?? 50),
+        wait_seconds === 0 ? await getImageTask(ctx, task_id) : await waitForImage(ctx, task_id, wait_seconds ?? 45),
       );
       return describeResult(r, task_id);
     }),
@@ -392,7 +393,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     {
       title: "Transcribe audio precisely (Google Gemini)",
       description:
-        "Careful verbatim transcription with timestamps for subtitles. Made for Kurdish (Sorani/Kurmanji), Arabic and Persian (and English). Returns SRT + JSON. Upload audio first (file_upload_link). Best with chunks of up to ~10 minutes; pass offset_seconds per chunk.",
+        "Careful verbatim transcription with timestamps for subtitles. Made for Kurdish (Sorani/Kurmanji), Arabic and Persian (and English). Starts a background job and returns a job_id at once; then call transcribe_result to get the SRT + JSON. Upload audio first (file_upload_link). Chunks of up to ~5 minutes; pass offset_seconds per chunk.",
       inputSchema: {
         audio: z.string().describe("file_id or https link of the audio (flac/mp3/wav/m4a/ogg; mp4 video also works but is larger)"),
         languages: z
@@ -421,124 +422,40 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     },
     wrap(async (a) => {
       await spend(ctx, "transcribe");
-      const o: TranscribeOptions = {
-        languages: a.languages ?? [],
-        glossary: a.glossary ?? [],
-        context: a.context,
-        speakers: a.speakers ?? false,
-        keep_fillers: a.keep_fillers ?? false,
-        verify: a.verify ?? true,
-        quality: a.quality ?? "best",
-        model: ctx.user.admin ? a.model : undefined,
-        offset_seconds: a.offset_seconds ?? 0,
-        max_segment_seconds: a.max_segment_seconds ?? 6,
-        max_chars: a.max_chars ?? 42,
+      const job = await startTranscriptionJob(ctx, a);
+      return {
+        status: "started",
+        job_id: job,
+        next: "Call transcribe_result with this job_id now and again until status is done. Each call waits up to ~45 s. Best quality takes about 2 minutes per minute of audio; up to 15 minutes per job.",
       };
+    }),
+  );
 
-      // Get the audio bytes (our storage or a public link) and hand them to Gemini's Files API.
-      const key = ownKey(ctx, a.audio);
-      let body: ReadableStream, size: number, type: string, name: string;
-      if (key) {
-        const obj = await ctx.env.FILES.get(key);
-        if (!obj) throw new Error("Audio file not found. Upload it first with file_upload_link.");
-        body = obj.body;
-        size = obj.size;
-        type = obj.httpMetadata?.contentType || guessType(key);
-        name = key.split("/").pop()!;
-      } else {
-        const res = await fetch(a.audio);
-        if (!res.ok || !res.body) throw new Error(`Could not download the audio (HTTP ${res.status}).`);
-        const buf = await res.arrayBuffer();
-        body = new Response(buf).body!;
-        size = buf.byteLength;
-        type = res.headers.get("content-type")?.split(";")[0] || guessType(a.audio);
-        name = "audio";
-      }
-      if (type === "application/octet-stream") type = guessType(name);
-      const gfile = await uploadToGemini(ctx, body, size, type, name).catch(async (e) => {
-        await spend(ctx, "transcribe", -1);
-        throw e;
-      });
-
-      const t0 = Date.now();
-      let tokens = 0;
-      let usedModel = "";
-      let okRun = false;
-      try {
-        let segments: Segment[] = [];
-        let language = "";
-        let model = "";
-        let note = "";
-        let passes = 1;
-        let useModelEngine = a.engine !== "speech";
-        if (a.engine === "speech") {
-          try {
-            const r = await transcribeWithSpeechModel(ctx, gfile, o);
-            tokens = r.tokens;
-            usedModel = r.model;
-            okRun = true;
-            segments = r.segments;
-            language = r.language;
-            model = r.model;
-            if (!segments.length && r.text) {
-              note = "The speech model returned text without timestamps.";
-              return { model, note, text: r.text };
-            }
-            if (!segments.length) throw new Error("The speech model returned no words.");
-          } catch (e) {
-            // Never leave the user without a transcript: fall back to the careful general model.
-            note = `Speech model failed, used the general model instead. (${String((e as Error).message).slice(0, 200)})`;
-            useModelEngine = true;
-          }
+  server.registerTool(
+    "transcribe_result",
+    {
+      title: "Get a transcription result",
+      description: "Waits (up to ~45 s per call) for a transcription job started by transcribe and returns the SRT when done. Call it again while status is running.",
+      inputSchema: {
+        job_id: z.string(),
+        wait_seconds: z.number().int().min(0).max(45).optional().describe("Seconds to wait in this call (default 40)."),
+      },
+    },
+    wrap(async ({ job_id, wait_seconds }) => {
+      const until = Date.now() + (wait_seconds ?? 40) * 1000;
+      for (;;) {
+        const st = await jobStatus(ctx, job_id);
+        if (st.status !== "running" || Date.now() >= until) {
+          if (st.status === "done") return st.result;
+          if (st.status === "error") throw new Error(`Transcription failed: ${st.error}`);
+          return {
+            status: "running",
+            job_id,
+            elapsed_seconds: Math.round((Date.now() - Date.parse(st.started)) / 1000),
+            next: "Still working. Call transcribe_result again with the same job_id.",
+          };
         }
-        if (useModelEngine) {
-          const speechCandidate =
-            o.quality === "best" && !o.model
-              ? transcribeWithSpeechModel(ctx, gfile, o)
-                  .then((r) => (r.segments.length ? { segments: r.segments, text: r.text, tokens: r.tokens } : null))
-                  .catch(() => null)
-              : undefined;
-          const r = await transcribeWithModel(ctx, gfile, o, speechCandidate);
-          tokens = r.tokens;
-          usedModel = r.model;
-          okRun = true;
-          segments = r.segments;
-          language = r.language;
-          model = r.model;
-          passes = r.passes;
-          note = note || `models: ${r.models_used.join(" + ")}`;
-        }
-        segments = cleanSegments(segments, o.offset_seconds);
-        const srt = toSrt(segments, o.speakers);
-        const saved = await putBytes(ctx, `${name.replace(/\.[^.]+$/, "")}.srt`, srt, "application/x-subrip");
-        const savedJson = await putBytes(
-          ctx,
-          `${name.replace(/\.[^.]+$/, "")}.json`,
-          JSON.stringify({ language, model, segments }, null, 2),
-          "application/json",
-        );
-        return [
-          `model: ${model} · passes: ${passes} · language: ${language} · segments: ${segments.length}`,
-          `srt_url: ${saved.url}`,
-          `json_url: ${savedJson.url}`,
-          note,
-          "",
-          srt,
-        ]
-          .filter((l) => l !== "")
-          .join("\n");
-      } finally {
-        ctx.waitUntil(deleteGeminiFile(ctx, gfile.name));
-        ctx.waitUntil(
-          logTranscription(ctx, {
-            project: a.project ?? "general",
-            model: usedModel || ctx.env.GEMINI_MODEL || "gemini",
-            file: name,
-            tokens,
-            ok: okRun,
-            seconds: Math.round((Date.now() - t0) / 1000),
-          }).catch(() => {}),
-        );
+        await new Promise((r) => setTimeout(r, Math.min(3000, Math.max(0, until - Date.now()))));
       }
     }),
   );
@@ -589,4 +506,143 @@ export function guessType(name: string): string {
     json: "application/json",
   };
   return map[ext] ?? "application/octet-stream";
+}
+
+// ---------------------------------------------------------------- background transcription
+
+export type TranscribeArgs = {
+  audio: string;
+  languages?: string[];
+  glossary?: string[];
+  context?: string;
+  speakers?: boolean;
+  keep_fillers?: boolean;
+  verify?: boolean;
+  quality?: "best" | "standard";
+  model?: string;
+  engine?: "auto" | "model" | "speech";
+  offset_seconds?: number;
+  max_segment_seconds?: number;
+  max_chars?: number;
+  project?: string;
+};
+
+/** Runs a whole transcription. Called inside the Jobs Durable Object (up to 15 min). */
+export async function runTranscription(ctx: Ctx, a: TranscribeArgs): Promise<unknown> {
+    const o: TranscribeOptions = {
+      languages: a.languages ?? [],
+      glossary: a.glossary ?? [],
+      context: a.context,
+      speakers: a.speakers ?? false,
+      keep_fillers: a.keep_fillers ?? false,
+      verify: a.verify ?? true,
+      quality: a.quality ?? "best",
+      model: ctx.user.admin ? a.model : undefined,
+      offset_seconds: a.offset_seconds ?? 0,
+      max_segment_seconds: a.max_segment_seconds ?? 6,
+      max_chars: a.max_chars ?? 42,
+    };
+
+    // Get the audio bytes (our storage or a public link) and hand them to Gemini's Files API.
+    const key = ownKey(ctx, a.audio);
+    let body: ReadableStream, size: number, type: string, name: string;
+    if (key) {
+      const obj = await ctx.env.FILES.get(key);
+      if (!obj) throw new Error("Audio file not found. Upload it first with file_upload_link.");
+      body = obj.body;
+      size = obj.size;
+      type = obj.httpMetadata?.contentType || guessType(key);
+      name = key.split("/").pop()!;
+    } else {
+      const res = await fetch(a.audio);
+      if (!res.ok || !res.body) throw new Error(`Could not download the audio (HTTP ${res.status}).`);
+      const buf = await res.arrayBuffer();
+      body = new Response(buf).body!;
+      size = buf.byteLength;
+      type = res.headers.get("content-type")?.split(";")[0] || guessType(a.audio);
+      name = "audio";
+    }
+    if (type === "application/octet-stream") type = guessType(name);
+    const gfile = await uploadToGemini(ctx, body, size, type, name);
+
+    const t0 = Date.now();
+    let tokens = 0;
+    let usedModel = "";
+    let okRun = false;
+    try {
+      let segments: Segment[] = [];
+      let language = "";
+      let model = "";
+      let note = "";
+      let passes = 1;
+      let useModelEngine = a.engine !== "speech";
+      if (a.engine === "speech") {
+        try {
+          const r = await transcribeWithSpeechModel(ctx, gfile, o);
+          tokens = r.tokens;
+          usedModel = r.model;
+          okRun = true;
+          segments = r.segments;
+          language = r.language;
+          model = r.model;
+          if (!segments.length && r.text) {
+            note = "The speech model returned text without timestamps.";
+            return { model, note, text: r.text };
+          }
+          if (!segments.length) throw new Error("The speech model returned no words.");
+        } catch (e) {
+          // Never leave the user without a transcript: fall back to the careful general model.
+          note = `Speech model failed, used the general model instead. (${String((e as Error).message).slice(0, 200)})`;
+          useModelEngine = true;
+        }
+      }
+      if (useModelEngine) {
+        const speechCandidate =
+          o.quality === "best" && !o.model
+            ? transcribeWithSpeechModel(ctx, gfile, o)
+                .then((r) => (r.segments.length ? { segments: r.segments, text: r.text, tokens: r.tokens } : null))
+                .catch(() => null)
+            : undefined;
+        const r = await transcribeWithModel(ctx, gfile, o, speechCandidate);
+        tokens = r.tokens;
+        usedModel = r.model;
+        okRun = true;
+        segments = r.segments;
+        language = r.language;
+        model = r.model;
+        passes = r.passes;
+        note = note || `models: ${r.models_used.join(" + ")}`;
+      }
+      segments = cleanSegments(segments, o.offset_seconds);
+      const srt = toSrt(segments, o.speakers);
+      const saved = await putBytes(ctx, `${name.replace(/\.[^.]+$/, "")}.srt`, srt, "application/x-subrip");
+      const savedJson = await putBytes(
+        ctx,
+        `${name.replace(/\.[^.]+$/, "")}.json`,
+        JSON.stringify({ language, model, segments }, null, 2),
+        "application/json",
+      );
+      return [
+        `model: ${model} · passes: ${passes} · language: ${language} · segments: ${segments.length}`,
+        `srt_url: ${saved.url}`,
+        `json_url: ${savedJson.url}`,
+        note,
+        "",
+        srt,
+      ]
+        .filter((l) => l !== "")
+        .join("\n");
+    } finally {
+      ctx.waitUntil(deleteGeminiFile(ctx, gfile.name));
+      ctx.waitUntil(
+        logTranscription(ctx, {
+          project: a.project ?? "general",
+          model: usedModel || ctx.env.GEMINI_MODEL || "gemini",
+          file: name,
+          tokens,
+          ok: okRun,
+          seconds: Math.round((Date.now() - t0) / 1000),
+        }).catch(() => {}),
+      );
+    }
 }
