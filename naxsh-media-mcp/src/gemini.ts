@@ -94,15 +94,69 @@ export async function deleteGeminiFile(ctx: Ctx, name: string) {
   await fetch(`${API}/v1beta/${name}`, { method: "DELETE", headers: { "x-goog-api-key": ctx.env.GEMINI_API_KEY } }).catch(() => {});
 }
 
+/** Preferred model, then fallbacks (GEMINI_FALLBACK_MODELS, comma-separated). */
+function modelChain(ctx: Ctx): string[] {
+  const list = [
+    ctx.env.GEMINI_MODEL || "gemini-3.1-pro-preview",
+    ...(ctx.env.GEMINI_FALLBACK_MODELS || "gemini-3.8-flash,gemini-3.5-flash,gemini-2.5-flash").split(","),
+  ];
+  return [...new Set(list.map((s) => s.trim()).filter(Boolean))];
+}
+
+/** Errors where another model may still work: quota (429), no access (403/404), overload (500/503). */
+function isSkippable(e: unknown): boolean {
+  const m = String((e as Error)?.message ?? "");
+  return /HTTP (429|403|404|500|503)\b/.test(m) || /quota|RESOURCE_EXHAUSTED|not found|UNAVAILABLE|overloaded/i.test(m);
+}
+
+/**
+ * Streams the answer (Server-Sent Events) so long transcriptions do not hit a gateway
+ * timeout, then returns it in the normal generateContent shape.
+ */
 async function generate(ctx: Ctx, model: string, body: unknown): Promise<any> {
-  const res = await fetch(`${API}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await fetch(`${API}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, {
     method: "POST",
     headers: { "x-goog-api-key": ctx.env.GEMINI_API_KEY, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const j: any = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`Gemini (${model}) error HTTP ${res.status}: ${JSON.stringify(j?.error ?? j).slice(0, 400)}`);
-  return j;
+  if (!res.ok || !res.body) {
+    const j: any = await res.json().catch(() => ({}));
+    throw new Error(`Gemini (${model}) error HTTP ${res.status}: ${JSON.stringify(j?.error ?? j).slice(0, 400)}`);
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  let text = "";
+  let usage: any;
+  let finish: string | undefined;
+  const handle = (line: string) => {
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") return;
+    let j: any;
+    try {
+      j = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (j.error) throw new Error(`Gemini (${model}) error: ${JSON.stringify(j.error).slice(0, 400)}`);
+    const c = j.candidates?.[0];
+    for (const p of c?.content?.parts ?? []) if (typeof p.text === "string" && !p.thought) text += p.text;
+    if (c?.finishReason) finish = c.finishReason;
+    if (j.usageMetadata) usage = j.usageMetadata;
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let i: number;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      handle(buf.slice(0, i).replace(/\r$/, ""));
+      buf = buf.slice(i + 1);
+    }
+  }
+  if (buf) handle(buf);
+  if (!text && finish && finish !== "STOP") throw new Error(`Gemini (${model}) stopped without text (${finish}).`);
+  return { candidates: [{ content: { parts: [{ text }] }, finishReason: finish }], usageMetadata: usage };
 }
 
 function textOf(resp: any): string {
@@ -189,18 +243,35 @@ export async function transcribeWithModel(
   ctx: Ctx,
   file: { uri: string; mimeType: string },
   o: TranscribeOptions,
-): Promise<{ language: string; segments: Segment[]; model: string; passes: number }> {
-  const model = ctx.env.GEMINI_MODEL || "gemini-3.1-pro-preview";
+): Promise<{ language: string; segments: Segment[]; model: string; passes: number; tokens: number }> {
   const audioPart = { file_data: { mime_type: file.mimeType, file_uri: file.uri } };
   const config = { response_mime_type: "application/json", response_schema: SCHEMA, max_output_tokens: 65536 };
 
-  const draftResp = await generate(ctx, model, {
-    system_instruction: { parts: [{ text: systemPrompt(o) }] },
-    contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }] }],
-    generation_config: config,
-  });
+  // Try the preferred model first; on a quota / access / overload error move to the next one.
+  // (A free-tier key has 0 quota for Pro models but works with Flash models.)
+  const chain = modelChain(ctx);
+  let model = chain[0];
+  let draftResp: any;
+  const tried: string[] = [];
+  for (const m of chain) {
+    try {
+      draftResp = await generate(ctx, m, {
+        system_instruction: { parts: [{ text: systemPrompt(o) }] },
+        contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }] }],
+        generation_config: config,
+      });
+      model = m;
+      break;
+    } catch (e) {
+      tried.push(`${m}: ${String((e as Error).message).slice(0, 160)}`);
+      if (!isSkippable(e)) throw e;
+    }
+  }
+  if (!draftResp) throw new Error(`No Gemini model accepted the request:\n${tried.join("\n")}`);
   let result = parseSegments(textOf(draftResp));
   let passes = 1;
+  const toks = (r: any) => Number(r?.usageMetadata?.totalTokenCount ?? 0);
+  let tokens = toks(draftResp);
 
   if (o.verify && result.segments.length) {
     const review = `Here is a DRAFT transcript of this audio (JSON). Listen to the WHOLE audio again, very carefully, and return the corrected transcript in the same JSON schema.
@@ -214,6 +285,7 @@ ${JSON.stringify(result)}`;
         contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }, { text: review }] }],
         generation_config: config,
       });
+      tokens += toks(fixed);
       const r2 = parseSegments(textOf(fixed));
       // Guard against a review pass that drops most of the text.
       const len = (r: typeof result) => r.segments.reduce((n, s) => n + s.text.length, 0);
@@ -225,7 +297,7 @@ ${JSON.stringify(result)}`;
       /* keep the draft */
     }
   }
-  return { ...result, model, passes };
+  return { ...result, model, passes, tokens };
 }
 
 // ---------------- Engine 2: Google's dedicated speech model (gemini-3.5-transcribe) ----------------
@@ -240,7 +312,7 @@ export async function transcribeWithSpeechModel(
   ctx: Ctx,
   file: { uri: string; mimeType: string },
   o: TranscribeOptions,
-): Promise<{ language: string; segments: Segment[]; model: string; text: string }> {
+): Promise<{ language: string; segments: Segment[]; model: string; text: string; tokens: number }> {
   const model = ctx.env.GEMINI_TRANSCRIBE_MODEL || "gemini-3.5-transcribe";
   const transcription_config: Record<string, unknown> = {
     mode: {
@@ -252,28 +324,56 @@ export async function transcribeWithSpeechModel(
   if (o.languages.length) transcription_config.language_codes = o.languages;
   if (o.glossary.length) transcription_config.custom_vocabulary = o.glossary;
 
-  const resp = await generate(ctx, model, {
-    contents: [{ role: "user", parts: [{ file_data: { mime_type: file.mimeType, file_uri: file.uri } }] }],
-    generation_config: { transcription_config },
-  });
-
-  const parts: any[] = resp?.candidates?.[0]?.content?.parts ?? [];
-  const words: { start: number; end: number; speaker?: string; word: string }[] = [];
-  for (const p of parts) {
-    const at = p.audioTranscription ?? p.audio_transcription ?? p.transcription;
-    const list: any[] = at?.words ?? p.words ?? [];
-    for (const w of list) {
-      words.push({
-        start: secs(w.startOffset ?? w.start_offset ?? w.start),
-        end: secs(w.endOffset ?? w.end_offset ?? w.end),
-        speaker: w.speakerLabel ?? w.speaker_label ?? at?.speakerLabel ?? p.speakerLabel,
-        word: String(w.word ?? w.text ?? ""),
-      });
+  // This model is served through the Interactions API (POST /v1beta/interactions), which
+  // takes snake_case fields. Two input shapes are tried, since the docs show both.
+  const key = ctx.env.GEMINI_API_KEY;
+  const errors: string[] = [];
+  const inputs = [
+    [{ type: "audio", uri: file.uri, mime_type: file.mimeType }],
+    [{ role: "user", content: [{ type: "audio", uri: file.uri, mime_type: file.mimeType }] }],
+  ];
+  let resp: any = null;
+  for (const input of inputs) {
+    const res = await fetch(`${API}/v1beta/interactions`, {
+      method: "POST",
+      headers: { "x-goog-api-key": key, "content-type": "application/json" },
+      body: JSON.stringify({ model, input, generation_config: { transcription_config } }),
+    });
+    const j: any = await res.json().catch(() => ({}));
+    if (res.ok) {
+      resp = j;
+      break;
     }
+    errors.push(`HTTP ${res.status}: ${JSON.stringify(j?.error ?? j).slice(0, 300)}`);
   }
-  const text = textOf(resp);
+  if (!resp) throw new Error(`Speech model (${model}) refused the request:\n${errors.join("\n")}`);
+
+  // Collect word items and text wherever they appear in the response.
+  const words: { start: number; end: number; speaker?: string; word: string }[] = [];
+  const texts: string[] = [];
+  const walk = (v: any, speaker?: string) => {
+    if (Array.isArray(v)) return v.forEach((x) => walk(x, speaker));
+    if (!v || typeof v !== "object") return;
+    const spk = v.speaker ?? v.speaker_label ?? v.speakerLabel ?? speaker;
+    const start = v.start_offset ?? v.startOffset ?? v.start_time ?? v.startTime;
+    const w = v.word ?? (start !== undefined ? v.text : undefined);
+    if (w !== undefined && start !== undefined) {
+      words.push({
+        start: secs(start),
+        end: secs(v.end_offset ?? v.endOffset ?? v.end_time ?? v.endTime ?? start),
+        speaker: spk,
+        word: String(w),
+      });
+      return;
+    }
+    if (typeof v.text === "string" && v.type !== "audio") texts.push(v.text);
+    for (const k of Object.keys(v)) if (typeof v[k] === "object") walk(v[k], spk);
+  };
+  walk(resp.steps ?? resp.outputs ?? resp.output ?? resp);
+  const text = texts.join("\n").trim();
   const segments = words.length ? groupWords(words, o) : [];
-  return { language: o.languages[0] ?? "", segments, model, text };
+  const tokens = Number(resp?.usage?.total_tokens ?? resp?.usage_metadata?.total_token_count ?? resp?.usageMetadata?.totalTokenCount ?? 0);
+  return { language: o.languages[0] ?? "", segments, model, text, tokens };
 }
 
 function secs(v: unknown): number {

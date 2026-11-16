@@ -12,6 +12,7 @@ import {
   type Segment,
   type TranscribeOptions,
 } from "./gemini";
+import { logImageEnd, logImageStart, logTranscription } from "./log";
 import { createImageTask, getImageTask, IMAGE_MODELS, waitForImage, type ImageVersion, type TaskResult } from "./kie";
 import {
   createUploadLink,
@@ -237,6 +238,11 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
 
   // ---------------- images ----------------
 
+  async function finish(task_id: string, r: TaskResult) {
+    if (r.state !== "pending") await logImageEnd(ctx, task_id, r.state, r.images?.[0]?.url).catch(() => {});
+    return r;
+  }
+
   const version = z
     .enum(Object.keys(IMAGE_MODELS) as [ImageVersion, ...ImageVersion[]])
     .optional()
@@ -251,6 +257,10 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     .enum(["auto", "opaque", "transparent"])
     .optional()
     .describe("transparent = real alpha PNG (useful for element sheets), only on models that support it.");
+  const projectArg = z
+    .string()
+    .optional()
+    .describe("Project name for the cost dashboard (defaults to the style name, else 'general'). Use the same name for all work of one project.");
   const wait = z.number().int().min(0).max(55).optional().describe("Seconds to wait for the result in this call (default 50).");
 
   server.registerTool(
@@ -269,6 +279,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         background,
         version,
         wait_seconds: wait,
+        project: projectArg,
       },
     },
     wrap(async (a) => {
@@ -289,7 +300,16 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         await spend(ctx, "images", -1); // give the credit back when Kie refuses the job
         throw e;
       });
-      const r = await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50);
+      await logImageStart(ctx, {
+        task_id: t.task_id,
+        project: a.project ?? a.style ?? "general",
+        model: t.model,
+        resolution: a.resolution ?? "2K",
+        prompt: a.prompt,
+        before: t.credits_before,
+        after: t.credits_after,
+      });
+      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50));
       return describeResult(r, t.task_id, { model: t.model, references_sent: job.urls.length });
     }),
   );
@@ -314,6 +334,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         background,
         version,
         wait_seconds: wait,
+        project: projectArg,
       },
     },
     wrap(async (a) => {
@@ -334,7 +355,16 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         await spend(ctx, "images", -1); // give the credit back when Kie refuses the job
         throw e;
       });
-      const r = await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50);
+      await logImageStart(ctx, {
+        task_id: t.task_id,
+        project: a.project ?? a.style ?? "general",
+        model: t.model,
+        resolution: a.resolution ?? "2K",
+        prompt: a.prompt,
+        before: t.credits_before,
+        after: t.credits_after,
+      });
+      const r = await finish(t.task_id, await waitForImage(ctx, t.task_id, a.wait_seconds ?? 50));
       return describeResult(r, t.task_id, { model: t.model, references_sent: job.urls.length });
     }),
   );
@@ -347,7 +377,10 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
       inputSchema: { task_id: z.string(), wait_seconds: wait },
     },
     wrap(async ({ task_id, wait_seconds }) => {
-      const r = wait_seconds === 0 ? await getImageTask(ctx, task_id) : await waitForImage(ctx, task_id, wait_seconds ?? 50);
+      const r = await finish(
+        task_id,
+        wait_seconds === 0 ? await getImageTask(ctx, task_id) : await waitForImage(ctx, task_id, wait_seconds ?? 50),
+      );
       return describeResult(r, task_id);
     }),
   );
@@ -378,6 +411,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         offset_seconds: z.number().optional().describe("Added to every timestamp (start time of this chunk in the full video)"),
         max_segment_seconds: z.number().optional().describe("Longest subtitle line in seconds (default 6)"),
         max_chars: z.number().int().optional().describe("Longest subtitle line in characters (default 42)"),
+        project: projectArg,
       },
     },
     wrap(async (a) => {
@@ -419,23 +453,42 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         throw e;
       });
 
+      const t0 = Date.now();
+      let tokens = 0;
+      let usedModel = "";
+      let okRun = false;
       try {
         let segments: Segment[] = [];
         let language = "";
         let model = "";
         let note = "";
         let passes = 1;
+        let useModelEngine = a.engine !== "speech";
         if (a.engine === "speech") {
-          const r = await transcribeWithSpeechModel(ctx, gfile, o);
-          segments = r.segments;
-          language = r.language;
-          model = r.model;
-          if (!segments.length && r.text) {
-            note = "The speech model returned text without timestamps.";
-            return { model, note, text: r.text };
+          try {
+            const r = await transcribeWithSpeechModel(ctx, gfile, o);
+            tokens = r.tokens;
+            usedModel = r.model;
+            okRun = true;
+            segments = r.segments;
+            language = r.language;
+            model = r.model;
+            if (!segments.length && r.text) {
+              note = "The speech model returned text without timestamps.";
+              return { model, note, text: r.text };
+            }
+            if (!segments.length) throw new Error("The speech model returned no words.");
+          } catch (e) {
+            // Never leave the user without a transcript: fall back to the careful general model.
+            note = `Speech model failed, used the general model instead. (${String((e as Error).message).slice(0, 200)})`;
+            useModelEngine = true;
           }
-        } else {
+        }
+        if (useModelEngine) {
           const r = await transcribeWithModel(ctx, gfile, o);
+          tokens = r.tokens;
+          usedModel = r.model;
+          okRun = true;
           segments = r.segments;
           language = r.language;
           model = r.model;
@@ -462,6 +515,16 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
           .join("\n");
       } finally {
         ctx.waitUntil(deleteGeminiFile(ctx, gfile.name));
+        ctx.waitUntil(
+          logTranscription(ctx, {
+            project: a.project ?? "general",
+            model: usedModel || ctx.env.GEMINI_MODEL || "gemini",
+            file: name,
+            tokens,
+            ok: okRun,
+            seconds: Math.round((Date.now() - t0) / 1000),
+          }).catch(() => {}),
+        );
       }
     }),
   );

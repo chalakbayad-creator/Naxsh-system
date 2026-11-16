@@ -2,6 +2,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { tokenFromRequest, userForToken } from "./auth";
 import type { Ctx, Env } from "./env";
 import { buildServer } from "./server";
+import { handleDashboard } from "./dashboard";
 import { kvBucket } from "./kvstore";
 import { handleSetup, withSavedKeys } from "./setup";
 import { handleFile, handleUpload } from "./storage";
@@ -23,6 +24,7 @@ export default {
     if (p.startsWith("/f/")) return handleFile(req, env, url);
     if (p.startsWith("/u/")) return handleUpload(req, env, url);
     if (p.startsWith("/setup/")) return handleSetup(req, env, url);
+    if (p.startsWith("/dashboard/") || p.startsWith("/api/dashboard/")) return handleDashboard(req, env, url);
 
     if (p === "/mcp" || p.startsWith("/mcp/")) {
       const user = userForToken(env, tokenFromRequest(req, url));

@@ -24,8 +24,12 @@ export interface Env {
   DEFAULT_IMAGE_MODEL?: string;
   /** General Gemini model used for careful transcription (Kurdish, Arabic, Persian...). */
   GEMINI_MODEL?: string;
+  /** Models tried in order when GEMINI_MODEL is refused (quota/access), comma-separated. */
+  GEMINI_FALLBACK_MODELS?: string;
   /** Google's dedicated speech-to-text model. */
   GEMINI_TRANSCRIBE_MODEL?: string;
+  /** Kie credits per US dollar, for the dashboard's $ estimates. */
+  CREDITS_PER_USD?: string;
   /** Largest upload in MB. */
   MAX_UPLOAD_MB?: string;
 }

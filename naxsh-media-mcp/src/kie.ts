@@ -63,7 +63,22 @@ function looksLikeModelMissing(e: unknown): boolean {
   return /model|not\s*(found|exist|support)|invalid.*model|unsupported/.test(m) && !/prompt|input_urls|aspect|resolution/.test(m);
 }
 
-export async function createImageTask(ctx: Ctx, r: ImageRequest): Promise<{ task_id: string; model: string; version: ImageVersion }> {
+/** Current Kie.ai credit balance (GET /api/v1/chat/credit). null if it cannot be read. */
+export async function getCredits(ctx: Ctx): Promise<number | null> {
+  try {
+    const j = await kieFetch(ctx, "/chat/credit");
+    const v = typeof j.data === "object" && j.data !== null ? (j.data.credits ?? j.data.balance) : j.data;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function createImageTask(
+  ctx: Ctx,
+  r: ImageRequest,
+): Promise<{ task_id: string; model: string; version: ImageVersion; credits_before: number | null; credits_after: number | null }> {
   if (!ctx.env.KIE_API_KEY) throw new Error("KIE_API_KEY is not set on the server.");
   const input: Record<string, unknown> = { prompt: r.prompt };
   if (r.input_urls.length) input.input_urls = r.input_urls.slice(0, 16);
@@ -72,6 +87,8 @@ export async function createImageTask(ctx: Ctx, r: ImageRequest): Promise<{ task
   if (r.quality) input.quality = r.quality;
   if (r.background) input.background = r.background;
 
+  // Kie charges when a task is created, so the balance before/after measures its cost.
+  const before = await getCredits(ctx);
   let lastErr: unknown;
   for (const v of fallbackChain(r.version)) {
     const model = r.input_urls.length ? IMAGE_MODELS[v].i2i : IMAGE_MODELS[v].t2i;
@@ -79,7 +96,9 @@ export async function createImageTask(ctx: Ctx, r: ImageRequest): Promise<{ task
       const j = await kieFetch(ctx, "/jobs/createTask", { method: "POST", body: JSON.stringify({ model, input }) });
       const taskId = j?.data?.taskId ?? j?.data?.task_id;
       if (!taskId) throw new Error(`Kie.ai gave no taskId: ${JSON.stringify(j).slice(0, 300)}`);
-      return { task_id: taskId, model, version: v };
+      await new Promise((res) => setTimeout(res, 1200));
+      const after = await getCredits(ctx);
+      return { task_id: taskId, model, version: v, credits_before: before, credits_after: after };
     } catch (e) {
       lastErr = e;
       if (!looksLikeModelMissing(e)) throw e;
