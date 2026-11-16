@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local testing only (never commit .dev.vars)
+KIE_API_KEY=
+GEMINI_API_KEY=
+ACCESS_TOKENS=akar:replace-with-a-long-random-token-at-least-24-chars
+SIGNING_SECRET=replace-with-another-long-random-secret
