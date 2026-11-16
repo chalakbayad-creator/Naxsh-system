@@ -24,6 +24,9 @@ Accuracy matters more than speed. ALWAYS use the `transcribe` tool; never transc
 7. Show the result to the user as it came back. Do NOT rewrite, "improve" or re-phrase the transcript yourself; you cannot hear the audio. Only point out words that look doubtful and ask.
 8. Save as `transcript.srt` in the project folder and send it.
 
+## The photo is never changed (user rule)
+The real video frame stays exactly as filmed: same framing, background, objects and person. Designs may only ADD layers on top (dark/colour overlays, vignettes, glows, light effects, graphic elements). The server sends this rule with every design. When checking a design, a replaced, redrawn, blurred-away or re-composed background is a failure: remake that frame once.
+
 ## The design is GPT's decision, never Claude's (user rule)
 GPT chooses every style, colour, font look, layout and element. Claude never describes, suggests or steers a style in any prompt, never writes style notes, and never "improves" a design. Claude only passes the frame, the content (keyword, goal, message, timing) and the fixed rules of `motion-graphics-gpt-design`. The only exception is a change the user asks for in their own words: pass it on as they said it.
 
@@ -45,7 +48,7 @@ Follow `motion-graphics-gpt-design` exactly (analysis, scenes, key frames, the 2
 
 **Why not plain `image_edit` for designs:** in ChatGPT, the chat model (GPT-5.x) first looks at the frame, plans the design and writes a long detailed prompt for the image tool. A bare image call skips that and gives a generic sticker/template look. `design_options` and `design_frames` restore that step: a GPT chat model is the art director, GPT Image renders. Always use them for video designs.
 
-**Taste library (the user's own taste, like ChatGPT's memory):** designs the user says they love are saved with `style_save(name="taste", add_refs=[...])` — only images the user chose, never Claude's choice. `design_options` shows up to 4 of them to GPT as a quality bar (not to copy). When the user says they love a design, offer once to add it.
+**Taste library (the user's own taste, like ChatGPT's memory):** designs the user says they love are saved with `style_save(name="taste", add_refs=[...])` — only images the user sent or chose, never Claude's choice. When the user sends examples saying "I like this kind of design", save them there. `design_options` shows up to 8 of them to the GPT art director and 3 to the image model as the taste and quality bar (not to copy). When the user says they love a design, offer once to add it.
 
 **Step 2A: five style options on ONE frame (always, for every new video).**
 1. Pick the most representative key frame (usually frame 1) and upload it.

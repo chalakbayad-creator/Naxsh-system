@@ -78,13 +78,14 @@ export async function loadStyle(ctx: Ctx, name: string): Promise<Style> {
 const MAX_REFS = 16;
 
 /** Build the final prompt + image list. Base images come first, then style references. */
-export function composeImageJob(base: string[], prompt: string, style: Style | null, keepBase: boolean, avoid: string[] = []) {
+export function composeImageJob(base: string[], prompt: string, style: Style | null, keepBase: boolean, avoid: string[] = [], taste: string[] = []) {
   const refs = style ? style.refs.map((r) => r.url).filter((u) => !base.includes(u)) : [];
   const room = Math.max(0, MAX_REFS - base.length);
   const usedRefs = refs.slice(-room); // newest approved designs matter most
   const usedAvoid = avoid.filter((u) => !base.includes(u)).slice(0, Math.max(0, MAX_REFS - base.length - usedRefs.length));
-  const urls = [...base, ...usedRefs, ...usedAvoid];
-  if (!style && !base.length && !usedAvoid.length) return { urls, prompt };
+  const usedTaste = taste.filter((u) => !base.includes(u)).slice(0, Math.max(0, MAX_REFS - base.length - usedRefs.length - usedAvoid.length));
+  const urls = [...base, ...usedRefs, ...usedAvoid, ...usedTaste];
+  if (!style && !base.length && !usedAvoid.length && !usedTaste.length) return { urls, prompt };
 
   const lines: string[] = [];
   if (base.length || usedRefs.length) {
@@ -106,6 +107,13 @@ export function composeImageJob(base: string[], prompt: string, style: Style | n
       const b = base.length + usedRefs.length + usedAvoid.length;
       lines.push(
         `- Image${a === b ? "" : "s"} ${a === b ? a : `${a}–${b}`}: OTHER DESIGN DIRECTIONS already made for this same frame. They are shown ONLY so you can avoid them. NOT the canvas.`,
+      );
+    }
+    if (usedTaste.length) {
+      const a = base.length + usedRefs.length + usedAvoid.length + 1;
+      const b = a + usedTaste.length - 1;
+      lines.push(
+        `- Image${a === b ? "" : "s"} ${a === b ? a : `${a}–${b}`}: TASTE REFERENCES — the kind of finish and design quality the client loves. Match that level of polish; do NOT copy their text, people, content or layout. NOT the canvas.`,
       );
     }
     lines.push("");

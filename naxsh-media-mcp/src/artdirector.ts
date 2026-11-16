@@ -119,10 +119,10 @@ function parseDirections(text: string): Direction[] {
 
 const SYSTEM = `You are ChatGPT working as a world-class senior motion-graphics designer and art director for premium short vertical videos (Reels/TikTok). Your work looks like the best agency and creator content: cinematic, bold, scroll-stopping, with real depth, light and polish — never clip-art, flat stickers, generic icons, cheap template looks or timid "safe" layouts.
 You receive a frame from the video and the brief. You decide EVERYTHING about the design yourself: concept, style, colours, typography look and hierarchy, layout, materials (glass, metal, light, paper, 3D…), effects, depth and how the photo itself is treated.
-You may treat the photo like a top designer would: relight or colour-grade it, defocus or darken the background, add vignettes, glows, light leaks, frames or shapes around the speaker, push depth — whatever makes the strongest design. The ONLY limits: the real person keeps the same face, identity, body, pose and clothing (never redraw or beautify them), and the on-screen text is exactly the text given in the brief (Kurdish, right-to-left, spelled letter by letter as given — make the text big and legible).
-Every design needs: ONE strong visual idea; HERO typography — the main line huge, heavy and high-contrast (roughly a quarter to a third of the frame height for the text block), the second line clearly smaller; a dramatic, cinematic treatment of the photo (light, colour, depth, shapes framing the speaker); and a finish that looks expensive. Never small, timid text in a corner.
+THE PHOTO IS SACRED (client rule): never replace, redraw, re-compose, crop, blur away, move, remove or add anything in the photo — the background, every object and the person (face, identity, body, pose, clothing) stay exactly as filmed, in the same framing. You MAY only add layers on top: dark or colour overlays, gradients, vignettes, glows, light effects and the graphic elements of your design.
+The on-screen text is exactly the text given in the brief (Kurdish, right-to-left, spelled letter by letter as given — big and legible).
 For each design write the full prompt you would send to your image tool (GPT Image) to render it from the provided frame: long, concrete and visual — composition and where every element sits, the exact on-screen text in quotes, typography look, materials, lighting, depth, effects, palette, finish quality. Write it like an expert prompt for a top image model.
-If TASTE images are attached, they are designs this client loves: match or beat their level of quality, boldness and finish, without copying them.
+If TASTE images are attached, they show the kind of design this client loves (for example: glassmorphism cards and pills, glowing neon edges, clean bold typography with a highlighted keyword, polished 3D icons, step/progress UI, gauges and data-like elements, all floating over the real footage). Every direction must clearly belong to that family of taste and reach that level of finish, while each direction is still its own concept. Do not copy their text or layout.
 Answer with JSON only.`;
 
 /** Ask GPT for `count` completely different design directions for one frame. */
@@ -137,7 +137,7 @@ export async function designDirections(
 ${taste.length ? `\nThe FIRST image is the frame. The other ${taste.length} image(s) are TASTE examples (designs this client loves) — quality bar only, not content and not a style to copy.\n` : ""}
 Create ${count} design directions for this frame that are COMPLETELY different from each other (different concept, palette, typography look, layout, effects, mood) — each one premium and agency-quality.
 Return a JSON array of ${count} objects: [{"name": "short name", "prompt": "the full image prompt"}].`;
-  const r = await callGpt(ctx, SYSTEM, user, [frameUrl, ...taste.slice(0, 4)]);
+  const r = await callGpt(ctx, SYSTEM, user, [frameUrl, ...taste.slice(0, 8)]);
   const directions = parseDirections(r.text).slice(0, count);
   if (!directions.length) throw new Error("Art director returned no usable directions.");
   return { directions, model: r.model };

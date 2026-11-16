@@ -27,7 +27,7 @@ export type DesignArgs =
     };
 
 const PERSON_RULE =
-  "Keep the real person exactly: same face and identity, same body, pose and clothing. Do not redraw or beautify the person.";
+  "PHOTO RULE: Image 1 is the real video frame and stays exactly as it is — same framing, same background and every object in it, same person (face, identity, body, pose, clothing). Do not replace, redraw, crop, blur, move, remove or add anything in the photo. Only add layers on top of it: dark/colour overlays, vignettes, glows, light effects and the graphic design elements.";
 
 interface Item {
   label: string;
@@ -49,7 +49,7 @@ interface Item {
 /** Saved "taste" examples of this user (designs they love), used as a quality bar. */
 async function tasteRefs(ctx: Ctx): Promise<string[]> {
   const s = await getJson<{ refs: { url: string }[] }>(ctx.env, `styles/${ctx.user.name}/taste.json`).catch(() => null);
-  return (s?.refs ?? []).map((r) => r.url).slice(-4);
+  return (s?.refs ?? []).map((r) => r.url).slice(-8);
 }
 
 /** Runs inside the Jobs Durable Object: GPT plans the designs, GPT Image renders, GPT reviews. */
@@ -107,11 +107,12 @@ export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
 
   if (a.kind === "options") {
     const frame = resolveToUrl(ctx, a.frame);
-    const plan = await designDirections(ctx, frame, a.brief, a.count, await tasteRefs(ctx));
+    const taste = await tasteRefs(ctx);
+    const plan = await designDirections(ctx, frame, a.brief, a.count, taste);
     director = plan.model;
     for (let i = 0; i < plan.directions.length; i++) {
       const d = plan.directions[i];
-      const job = composeImageJob([frame], `${d.prompt}\n\n${PERSON_RULE}`, null, false);
+      const job = composeImageJob([frame], `${d.prompt}\n\n${PERSON_RULE}`, null, false, [], taste.slice(0, 3));
       items.push({ label: `option ${i + 1}`, name: d.name, frame, brief: a.brief, prompt: job.prompt, urls: job.urls, status: "pending" });
     }
     // Directions GPT did not return were paid in advance: give them back.
@@ -145,6 +146,22 @@ export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
 
   for (const item of items) if (item.status === "pending") await submit(item);
   await waitAll(started + 8 * 60 * 1000);
+
+  // A render refused by the content filter is retried once with only the frame (no extra reference images).
+  const flagged = items.filter((i) => i.status === "fail" && /sensitive|flagged|moderation|policy/i.test(i.error ?? ""));
+  for (const item of flagged) {
+    try {
+      await spend(ctx, "images", 1);
+    } catch {
+      continue;
+    }
+    item.retried = true;
+    item.urls = item.urls.slice(0, 1);
+    item.prompt = item.prompt.replace(/^- Image[^\n]*TASTE REFERENCES[^\n]*\n/m, "");
+    item.error = undefined;
+    await submit(item);
+  }
+  if (flagged.length) await waitAll(started + 10 * 60 * 1000);
 
   // Art-director review: GPT looks at each result; weak ones (or wrong text / changed person) are fixed once.
   if (a.review === true && Date.now() - started < 8 * 60 * 1000) {
