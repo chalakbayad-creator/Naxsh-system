@@ -5,7 +5,7 @@ description: "Use whenever the naxsh-media MCP tools are connected (transcribe, 
 
 # Naxsh media tools (MCP)
 
-The `naxsh-media` MCP server gives Claude two paid services: **Google Gemini** for precise transcription and **GPT Image (via Kie.ai)** for image generation and editing. Every call costs money: never generate "just to try"; write the prompt carefully first. Reply to the user in their language (usually Kurdish Sorani); keep messages short.
+The `naxsh-media` MCP server gives Claude two paid services: **Google Gemini** for precise transcription and **GPT Image (via Kie.ai)** for image generation and editing. Every call costs money: never generate "just to try"; write the prompt carefully first. Always reply in the language the user writes in (Kurdish Sorani, Persian, Arabic, English...); keep messages short.
 
 ## Files
 - Local file → `file_upload_link(filename)` → run the returned `curl` command from the file's folder → use the returned `file_id`.
