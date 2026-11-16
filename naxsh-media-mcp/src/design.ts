@@ -1,9 +1,9 @@
-import { designDirections, designFramePrompt } from "./artdirector";
+import { designDirections, designFramePrompt, reviewDesign, type Review } from "./artdirector";
 import type { Ctx } from "./env";
 import { createImageTask, getImageTask, type ImageVersion } from "./kie";
 import { logImageEnd, logImageStart } from "./log";
 import { composeImageJob, loadStyle } from "./server";
-import { resolveToUrl, spend, type StoredFile } from "./storage";
+import { getJson, resolveToUrl, spend, type StoredFile } from "./storage";
 
 export type DesignArgs =
   | {
@@ -14,6 +14,7 @@ export type DesignArgs =
       aspect_ratio?: string;
       resolution?: string;
       project?: string;
+      review?: boolean;
     }
   | {
       kind: "frames";
@@ -22,32 +23,49 @@ export type DesignArgs =
       aspect_ratio?: string;
       resolution?: string;
       project?: string;
+      review?: boolean;
     };
 
 const PERSON_RULE =
-  "Keep the real person exactly: same face and identity, same body, pose, clothing and position in the frame. Do not redraw or beautify the person.";
+  "Keep the real person exactly: same face and identity, same body, pose and clothing. Do not redraw or beautify the person.";
 
 interface Item {
   label: string;
   name?: string;
+  frame: string;
+  brief: string;
+  prompt: string;
+  urls: string[];
   task_id?: string;
   model?: string;
   status: "pending" | "success" | "fail";
   images?: StoredFile[];
+  first_try?: string;
+  review?: Review;
+  retried?: boolean;
   error?: string;
 }
 
-/** Runs inside the Jobs Durable Object: GPT plans the designs, GPT Image renders them. */
+/** Saved "taste" examples of this user (designs they love), used as a quality bar. */
+async function tasteRefs(ctx: Ctx): Promise<string[]> {
+  const s = await getJson<{ refs: { url: string }[] }>(ctx.env, `styles/${ctx.user.name}/taste.json`).catch(() => null);
+  return (s?.refs ?? []).map((r) => r.url).slice(-4);
+}
+
+/** Runs inside the Jobs Durable Object: GPT plans the designs, GPT Image renders, GPT reviews. */
 export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
   const version = (ctx.env.DEFAULT_IMAGE_MODEL ?? "2.5-sunburst") as ImageVersion;
   const resolution = a.resolution ?? "2K";
+  const quality = ctx.env.IMAGE_QUALITY || undefined;
   const project = a.project ?? (a.kind === "frames" ? a.style : "general");
   const items: Item[] = [];
   let director = "";
 
-  const submit = async (item: Item, prompt: string, urls: string[]) => {
+  const submit = async (item: Item) => {
+    item.status = "pending";
+    item.task_id = undefined;
     try {
-      const t = await createImageTask(ctx, { prompt, input_urls: urls, aspect_ratio: a.aspect_ratio, resolution, version });
+      const t = await createImageTask(ctx, { prompt: item.prompt, input_urls: item.urls, aspect_ratio: a.aspect_ratio, resolution, quality, version });
       item.task_id = t.task_id;
       item.model = t.model;
       await logImageStart(ctx, {
@@ -55,7 +73,7 @@ export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
         project,
         model: t.model,
         resolution,
-        prompt: `${item.label}${item.name ? ` · ${item.name}` : ""}`,
+        prompt: `${item.label}${item.name ? ` · ${item.name}` : ""}${item.retried ? " · retry" : ""}`,
         before: t.credits_before,
         after: t.credits_after,
       }).catch(() => {});
@@ -66,61 +84,110 @@ export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
     }
   };
 
+  const waitAll = async (deadline: number) => {
+    while (items.some((i) => i.status === "pending" && i.task_id) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 6000));
+      for (const item of items) {
+        if (item.status !== "pending" || !item.task_id) continue;
+        try {
+          const r = await getImageTask(ctx, item.task_id);
+          if (r.state === "pending") continue;
+          item.status = r.state;
+          if (r.images) item.images = r.images;
+          item.error = r.error;
+          await logImageEnd(ctx, item.task_id, r.state, r.images?.[0]?.url).catch(() => {});
+        } catch {
+          /* try again next round */
+        }
+      }
+    }
+  };
+
+  const started = Date.now();
+
   if (a.kind === "options") {
     const frame = resolveToUrl(ctx, a.frame);
-    const plan = await designDirections(ctx, frame, a.brief, a.count);
+    const plan = await designDirections(ctx, frame, a.brief, a.count, await tasteRefs(ctx));
     director = plan.model;
     for (let i = 0; i < plan.directions.length; i++) {
       const d = plan.directions[i];
-      const item: Item = { label: `option ${i + 1}`, name: d.name, status: "pending" };
-      items.push(item);
       const job = composeImageJob([frame], `${d.prompt}\n\n${PERSON_RULE}`, null, false);
-      await submit(item, job.prompt, job.urls);
+      items.push({ label: `option ${i + 1}`, name: d.name, frame, brief: a.brief, prompt: job.prompt, urls: job.urls, status: "pending" });
     }
+    // Directions GPT did not return were paid in advance: give them back.
+    if (plan.directions.length < a.count) await spend(ctx, "images", plan.directions.length - a.count).catch(() => {});
   } else {
     const style = await loadStyle(ctx, a.style);
     const refs = style.refs.map((r) => r.url);
     const plans = await Promise.all(
       a.frames.map(async (f, i) => {
         const frame = resolveToUrl(ctx, f.image);
+        const label = f.label ?? `frame ${i + 1}`;
         try {
           const p = await designFramePrompt(ctx, frame, refs, f.brief);
-          return { frame, label: f.label ?? `frame ${i + 1}`, prompt: p.prompt, model: p.model };
+          return { frame, label, brief: f.brief, prompt: p.prompt, model: p.model };
         } catch (e) {
-          return { frame, label: f.label ?? `frame ${i + 1}`, error: String((e as Error).message).slice(0, 300) };
+          return { frame, label, brief: f.brief, error: String((e as Error).message).slice(0, 300) };
         }
       }),
     );
     for (const p of plans) {
-      const item: Item = { label: p.label, status: "pending" };
-      items.push(item);
       if ("error" in p) {
-        item.status = "fail";
-        item.error = p.error;
+        items.push({ label: p.label, frame: p.frame, brief: p.brief, prompt: "", urls: [], status: "fail", error: p.error });
         await spend(ctx, "images", -1).catch(() => {});
         continue;
       }
       director = p.model;
       const job = composeImageJob([p.frame], `${p.prompt}\n\n${PERSON_RULE}`, style, false);
-      await submit(item, job.prompt, job.urls);
+      items.push({ label: p.label, frame: p.frame, brief: p.brief, prompt: job.prompt, urls: job.urls, status: "pending" });
     }
   }
 
-  // Wait for every render (the Durable Object alarm may run up to 15 minutes).
-  const until = Date.now() + 13 * 60 * 1000;
-  while (items.some((i) => i.status === "pending" && i.task_id) && Date.now() < until) {
-    await new Promise((r) => setTimeout(r, 6000));
+  for (const item of items) if (item.status === "pending") await submit(item);
+  await waitAll(started + 8 * 60 * 1000);
+
+  // Art-director review: GPT looks at each result; weak ones (or wrong text / changed person) are fixed once.
+  if (a.review === true && Date.now() - started < 8 * 60 * 1000) {
+    await Promise.all(
+      items.map(async (item) => {
+        if (item.status !== "success" || !item.images?.[0]) return;
+        try {
+          item.review = await reviewDesign(ctx, item.frame, item.images[0].url, item.brief, item.prompt);
+        } catch {
+          /* no review, keep the image */
+        }
+      }),
+    );
     for (const item of items) {
-      if (item.status !== "pending" || !item.task_id) continue;
+      const r = item.review;
+      if (!r || !r.revised_prompt) continue;
+      // On-screen text is retyped with real fonts later, so only design quality or a changed person triggers a remake.
+      if (r.score >= 7 && r.person_ok) continue;
       try {
-        const r = await getImageTask(ctx, item.task_id);
-        if (r.state === "pending") continue;
-        item.status = r.state;
-        item.images = r.images;
-        item.error = r.error;
-        await logImageEnd(ctx, item.task_id, r.state, r.images?.[0]?.url).catch(() => {});
+        await spend(ctx, "images", 1);
       } catch {
-        /* try again next round */
+        continue; // daily limit reached: keep the first result
+      }
+      item.first_try = item.images?.[0]?.url;
+      item.retried = true;
+      const keepRefs = item.urls.slice(1);
+      item.prompt = composeImageJob([item.frame], `${r.revised_prompt}\n\n${PERSON_RULE}`, null, false).prompt;
+      // Frames keep their style references.
+      if (keepRefs.length && a.kind === "frames") {
+        const style = await loadStyle(ctx, a.style);
+        const job = composeImageJob([item.frame], `${r.revised_prompt}\n\n${PERSON_RULE}`, style, false);
+        item.prompt = job.prompt;
+        item.urls = job.urls;
+      }
+      await submit(item);
+    }
+    await waitAll(started + 13 * 60 * 1000);
+    // A failed retry falls back to the first image.
+    for (const item of items) {
+      if (item.retried && item.status !== "success" && item.first_try) {
+        item.status = "success";
+        item.images = [{ file_id: "", filename: "", url: item.first_try }];
+        item.error = undefined;
       }
     }
   }
@@ -132,9 +199,11 @@ export async function runDesign(ctx: Ctx, a: DesignArgs): Promise<unknown> {
       ...(i.name ? { direction: i.name } : {}),
       status: i.status === "pending" ? "still_rendering" : i.status,
       ...(i.images ? { images: i.images.map((x) => x.url) } : {}),
+      ...(i.review ? { review: { score: i.review.score, text_ok: i.review.text_ok, person_ok: i.review.person_ok, issues: i.review.issues } } : {}),
+      ...(i.retried ? { first_try: i.first_try } : {}),
       ...(i.task_id && i.status === "pending" ? { task_id: i.task_id, next: "call image_result with this task_id" } : {}),
       ...(i.error ? { error: i.error } : {}),
     })),
-    next: "Download every image with curl, look at each one, then send them all together to the user.",
+    next: "Download every image (images[0]) with curl, look at each one, then send them all together to the user.",
   };
 }

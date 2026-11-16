@@ -117,19 +117,27 @@ function parseDirections(text: string): Direction[] {
     .filter((d: Direction) => d.prompt.length > 40);
 }
 
-const SYSTEM = `You are ChatGPT working as a world-class senior motion-graphics and social-media designer. You design premium, modern, eye-catching frames for short vertical videos (Reels/TikTok) — the kind top agencies make, never generic clip-art or template looks.
-You receive a frame from the video and the brief. You decide EVERYTHING about the design yourself: style, colours, typography look, layout, effects, depth, how the photo is treated.
-For each design you write the full prompt you would send to your image tool (GPT Image) to render it on top of the provided frame: long, concrete and visual (composition and where each element sits, exact on-screen text in quotes, typography look, materials, lighting, depth, effects, colour palette, finish quality).
-Keep the person's identity, face, body and pose. Write on-screen text exactly as given in the brief (Kurdish, right-to-left).
+const SYSTEM = `You are ChatGPT working as a world-class senior motion-graphics designer and art director for premium short vertical videos (Reels/TikTok). Your work looks like the best agency and creator content: cinematic, bold, scroll-stopping, with real depth, light and polish — never clip-art, flat stickers, generic icons, cheap template looks or timid "safe" layouts.
+You receive a frame from the video and the brief. You decide EVERYTHING about the design yourself: concept, style, colours, typography look and hierarchy, layout, materials (glass, metal, light, paper, 3D…), effects, depth and how the photo itself is treated.
+You may treat the photo like a top designer would: relight or colour-grade it, defocus or darken the background, add vignettes, glows, light leaks, frames or shapes around the speaker, push depth — whatever makes the strongest design. The ONLY limits: the real person keeps the same face, identity, body, pose and clothing (never redraw or beautify them), and the on-screen text is exactly the text given in the brief (Kurdish, right-to-left, spelled letter by letter as given — make the text big and legible).
+Every design needs: ONE strong visual idea; HERO typography — the main line huge, heavy and high-contrast (roughly a quarter to a third of the frame height for the text block), the second line clearly smaller; a dramatic, cinematic treatment of the photo (light, colour, depth, shapes framing the speaker); and a finish that looks expensive. Never small, timid text in a corner.
+For each design write the full prompt you would send to your image tool (GPT Image) to render it from the provided frame: long, concrete and visual — composition and where every element sits, the exact on-screen text in quotes, typography look, materials, lighting, depth, effects, palette, finish quality. Write it like an expert prompt for a top image model.
+If TASTE images are attached, they are designs this client loves: match or beat their level of quality, boldness and finish, without copying them.
 Answer with JSON only.`;
 
 /** Ask GPT for `count` completely different design directions for one frame. */
-export async function designDirections(ctx: Ctx, frameUrl: string, brief: string, count: number): Promise<{ directions: Direction[]; model: string }> {
+export async function designDirections(
+  ctx: Ctx,
+  frameUrl: string,
+  brief: string,
+  count: number,
+  taste: string[] = [],
+): Promise<{ directions: Direction[]; model: string }> {
   const user = `${brief}
-
+${taste.length ? `\nThe FIRST image is the frame. The other ${taste.length} image(s) are TASTE examples (designs this client loves) — quality bar only, not content and not a style to copy.\n` : ""}
 Create ${count} design directions for this frame that are COMPLETELY different from each other (different concept, palette, typography look, layout, effects, mood) — each one premium and agency-quality.
 Return a JSON array of ${count} objects: [{"name": "short name", "prompt": "the full image prompt"}].`;
-  const r = await callGpt(ctx, SYSTEM, user, [frameUrl]);
+  const r = await callGpt(ctx, SYSTEM, user, [frameUrl, ...taste.slice(0, 4)]);
   const directions = parseDirections(r.text).slice(0, count);
   if (!directions.length) throw new Error("Art director returned no usable directions.");
   return { directions, model: r.model };
@@ -137,6 +145,7 @@ Return a JSON array of ${count} objects: [{"name": "short name", "prompt": "the 
 
 /** Ask GPT to write the prompt for one more frame in the chosen style (shown as reference images). */
 export async function designFramePrompt(ctx: Ctx, frameUrl: string, styleRefs: string[], brief: string): Promise<{ prompt: string; model: string }> {
+  // Approved designs of this video are the style; taste examples are not needed here.
   const user = `${brief}
 
 The FIRST image is the new frame to design. The other image(s) are the APPROVED design(s) of this same video: the new frame must belong to the same design system (same palette, typography look, materials, effects, mood and finish) but with its own new composition that fits this frame's content — not a copy-paste of the approved layout.
@@ -145,4 +154,39 @@ Return a JSON array with ONE object: [{"name": "frame", "prompt": "the full imag
   const d = parseDirections(r.text)[0];
   if (!d) throw new Error("Art director returned no prompt.");
   return { prompt: d.prompt, model: r.model };
+}
+
+export interface Review {
+  score: number;
+  text_ok: boolean;
+  person_ok: boolean;
+  issues: string;
+  revised_prompt?: string;
+}
+
+/** GPT looks at a rendered design like an art director and either approves it or rewrites the prompt. */
+export async function reviewDesign(ctx: Ctx, frameUrl: string, resultUrl: string, brief: string, prompt: string): Promise<Review> {
+  const user = `${brief}
+
+You art-directed this frame. Image 1 is the original frame, image 2 is what the image model rendered from your prompt below. Review it strictly as a senior art director:
+1. Is the on-screen Kurdish text EXACTLY right (every letter, no missing/extra/garbled characters, no stray symbols)?
+2. Is the person still clearly the same person (same identity and pose)? Small regeneration differences are normal and fine; only a different-looking face or a changed pose is a failure.
+3. Is it truly premium, bold and polished (big hero text, one strong idea, cinematic treatment) — at the level of the best agency work — with no clip-art, cheap or messy parts?
+Give a score 1–10. If the score is below 8, or the text or the person is wrong, write a REVISED full prompt that fixes every problem while keeping the same design direction.
+
+YOUR PROMPT WAS:
+${prompt}
+
+Return JSON only: {"score": n, "text_ok": true|false, "person_ok": true|false, "issues": "short", "revised_prompt": "full prompt or empty"}`;
+  const r = await callGpt(ctx, SYSTEM, user, [frameUrl, resultUrl]);
+  const m = r.text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("Review gave no JSON.");
+  const j = JSON.parse(m[0]);
+  return {
+    score: Number(j.score ?? 0),
+    text_ok: j.text_ok !== false,
+    person_ok: j.person_ok !== false,
+    issues: String(j.issues ?? "").slice(0, 300),
+    revised_prompt: typeof j.revised_prompt === "string" && j.revised_prompt.length > 40 ? j.revised_prompt : undefined,
+  };
 }

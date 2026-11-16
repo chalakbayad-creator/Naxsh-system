@@ -34,6 +34,8 @@ export interface Env {
   GEMINI_TRANSCRIBE_MODEL?: string;
   /** Kie credits per US dollar, for the dashboard's $ estimates. */
   CREDITS_PER_USD?: string;
+  /** Optional GPT Image quality sent to Kie (e.g. "high"); empty = model default. */
+  IMAGE_QUALITY?: string;
   /** Largest upload in MB. */
   MAX_UPLOAD_MB?: string;
 }

@@ -45,10 +45,12 @@ Follow `motion-graphics-gpt-design` exactly (analysis, scenes, key frames, the 2
 
 **Why not plain `image_edit` for designs:** in ChatGPT, the chat model (GPT-5.x) first looks at the frame, plans the design and writes a long detailed prompt for the image tool. A bare image call skips that and gives a generic sticker/template look. `design_options` and `design_frames` restore that step: a GPT chat model is the art director, GPT Image renders. Always use them for video designs.
 
+**Taste library (the user's own taste, like ChatGPT's memory):** designs the user says they love are saved with `style_save(name="taste", add_refs=[...])` — only images the user chose, never Claude's choice. `design_options` shows up to 4 of them to GPT as a quality bar (not to copy). When the user says they love a design, offer once to add it.
+
 **Step 2A: five style options on ONE frame (always, for every new video).**
 1. Pick the most representative key frame (usually frame 1) and upload it.
 2. `design_options(frame, brief, count=5, aspect_ratio=<frame ratio>, resolution="2K", project=<video name>)`. The `brief` is the 2A general prompt + that frame's 2B prompt (transcript, goal, message, the frame's on-screen text, timing, burned-in overlays to keep). NO style words. GPT invents 5 completely different directions itself.
-3. Poll `design_result(job_id)` until done (2–5 min; tell the user once it is working).
+3. Poll `design_result(job_id)` until done (2–5 min; tell the user once it is working). `review: true` makes GPT check each result and remake weak ones once (up to double cost) — only if the user asks for it.
 4. Download all 5, look at each, send them all together in one message (SendUserFile), numbered 1–5, with GPT's direction name only — no opinion or recommendation from Claude. Ask: "کام ستایلە؟" and wait.
 5. The chosen option → `style_save(<video name>, add_refs=[chosen design])`.
 

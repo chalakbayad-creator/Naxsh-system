@@ -512,6 +512,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         brief: z.string().describe("The project brief for GPT: transcript/goal/message, the frame's on-screen text, timing and fixed rules. No style descriptions."),
         count: z.number().int().min(1).max(6).optional().describe("Number of different directions (default 5)"),
         dry_run: z.boolean().optional().describe("Admin only: return GPT's design prompts without rendering."),
+        review: z.boolean().optional().describe("true = GPT reviews each result and remakes weak ones once (costs up to 2x). Default false."),
         aspect_ratio: aspect,
         resolution,
         project: projectArg,
@@ -529,6 +530,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         aspect_ratio: a.aspect_ratio,
         resolution: a.resolution,
         project: a.project,
+        review: a.review,
       });
       return { status: "started", job_id: job, next: "Call design_result with this job_id until it is done (usually 2–5 minutes)." };
     }),
