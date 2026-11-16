@@ -77,12 +77,13 @@ async function loadStyle(ctx: Ctx, name: string): Promise<Style> {
 const MAX_REFS = 16;
 
 /** Build the final prompt + image list. Base images come first, then style references. */
-export function composeImageJob(base: string[], prompt: string, style: Style | null, keepBase: boolean) {
+export function composeImageJob(base: string[], prompt: string, style: Style | null, keepBase: boolean, avoid: string[] = []) {
   const refs = style ? style.refs.map((r) => r.url).filter((u) => !base.includes(u)) : [];
   const room = Math.max(0, MAX_REFS - base.length);
   const usedRefs = refs.slice(-room); // newest approved designs matter most
-  const urls = [...base, ...usedRefs];
-  if (!style && !base.length) return { urls, prompt };
+  const usedAvoid = avoid.filter((u) => !base.includes(u)).slice(0, Math.max(0, MAX_REFS - base.length - usedRefs.length));
+  const urls = [...base, ...usedRefs, ...usedAvoid];
+  if (!style && !base.length && !usedAvoid.length) return { urls, prompt };
 
   const lines: string[] = [];
   if (base.length || usedRefs.length) {
@@ -99,11 +100,24 @@ export function composeImageJob(base: string[], prompt: string, style: Style | n
         `- Image${a === b ? "" : "s"} ${a === b ? a : `${a}–${b}`}: STYLE REFERENCES — approved designs of this same project. They are NOT content to copy and NOT the canvas.`,
       );
     }
+    if (usedAvoid.length) {
+      const a = base.length + usedRefs.length + 1;
+      const b = base.length + usedRefs.length + usedAvoid.length;
+      lines.push(
+        `- Image${a === b ? "" : "s"} ${a === b ? a : `${a}–${b}`}: OTHER DESIGN DIRECTIONS already made for this same frame. They are shown ONLY so you can avoid them. NOT the canvas.`,
+      );
+    }
     lines.push("");
+  }
+  if (usedAvoid.length) {
+    lines.push(
+      "BE DIFFERENT: Create a completely new design direction of your own choice that shares NOTHING with the other directions shown: a different colour palette, different typography style, different shapes and element types, different layout and composition, different visual technique and mood. Someone comparing them side by side must see clearly separate styles. You decide the style yourself.",
+      "",
+    );
   }
   if (style) {
     lines.push(
-      "STYLE LOCK: The result must look like it belongs to the same series as the style references: same design system — colour palette and colour grading of the graphics, gradients, glass / frosted / blur treatment and its opacity, glows and shadows, shapes and corner radii, line weights, icon drawing style, typography style (weight, case, size hierarchy), spacing and layout logic, texture and level of detail, and the same overall mood. Do not invent a new style. Do not copy the references' text or their content; apply their visual language to this task.",
+      "STYLE LOCK: The result must look like it belongs to the same series as the style references: same design system — colour palette and colour grading of the graphics, gradients, glass / frosted / blur treatment and its opacity, glows and shadows, shapes and corner radii, line weights, icon drawing style, typography style (weight, case, size hierarchy), spacing logic, texture and level of detail, and the same overall mood. Do not invent a new style. But it must NOT be a copy-paste of a reference: do not copy their text, content or exact layout; design a new composition for THIS frame and its content, using the same visual language, like the next page of the same professionally designed series.",
     );
     if (style.notes.trim()) lines.push(`STYLE NOTES (always follow): ${style.notes.trim()}`);
     lines.push("");
@@ -258,6 +272,10 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     .enum(["auto", "opaque", "transparent"])
     .optional()
     .describe("transparent = real alpha PNG (useful for element sheets), only on models that support it.");
+  const avoidArg = z
+    .array(z.string())
+    .optional()
+    .describe("Designs already made for this same frame (other style options). The model sees them only to make a completely different style.");
   const projectArg = z
     .string()
     .optional()
@@ -274,6 +292,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         prompt: z.string().min(3),
         style: z.string().optional(),
         reference_images: z.array(z.string()).optional().describe("Extra file_ids/links to use as references"),
+        avoid_images: avoidArg,
         aspect_ratio: aspect,
         resolution,
         quality,
@@ -286,7 +305,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     wrap(async (a) => {
       const style = a.style ? await loadStyle(ctx, a.style) : null;
       const extra = (a.reference_images ?? []).map((r) => resolveToUrl(ctx, r));
-      const job = composeImageJob(extra, a.prompt, style, false);
+      const job = composeImageJob(extra, a.prompt, style, false, (a.avoid_images ?? []).map((r) => resolveToUrl(ctx, r)));
       const v = (a.version ?? ctx.env.DEFAULT_IMAGE_MODEL ?? "2.5-sunburst") as ImageVersion;
       await spend(ctx, "images");
       const t = await createImageTask(ctx, {
@@ -324,6 +343,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
       inputSchema: {
         prompt: z.string().min(3),
         images: z.array(z.string()).min(1).describe("file_ids or links; the first is the base image"),
+        avoid_images: avoidArg,
         style: z.string().optional(),
         keep_base: z
           .boolean()
@@ -341,7 +361,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
     wrap(async (a) => {
       const style = a.style ? await loadStyle(ctx, a.style) : null;
       const base = a.images.map((r) => resolveToUrl(ctx, r));
-      const job = composeImageJob(base, a.prompt, style, a.keep_base ?? true);
+      const job = composeImageJob(base, a.prompt, style, a.keep_base ?? true, (a.avoid_images ?? []).map((r) => resolveToUrl(ctx, r)));
       const v = (a.version ?? ctx.env.DEFAULT_IMAGE_MODEL ?? "2.5-sunburst") as ImageVersion;
       await spend(ctx, "images");
       const t = await createImageTask(ctx, {
