@@ -1,6 +1,9 @@
 export interface Env {
-  /** R2 bucket: uploaded files, generated images, transcripts, saved styles, usage counters. */
+  /** Storage: uploaded files, generated images, transcripts, saved styles, usage counters.
+   *  Either an R2 bucket binding, or built at runtime from the STORE KV namespace. */
   FILES: R2Bucket;
+  /** KV namespace used when no R2 bucket is bound (free accounts). */
+  STORE?: KVNamespace;
 
   // ---- Secrets (set with `npx wrangler secret put NAME`) ----
   /** Kie.ai API key. */

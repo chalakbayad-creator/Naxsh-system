@@ -4,7 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  "r2_buckets": [{ "binding": "FILES", "bucket_name": "naxsh-media-files" }],
+  "account_id": "590b8210167b78f8cd709ca6b2f771a0",
+  // Free storage (no payment method needed). To use R2 instead, add an r2_buckets binding named FILES.
+  "kv_namespaces": [{ "binding": "STORE", "id": "959337ede20a4f8fab5df3ffc8548743" }],
   "observability": { "enabled": true },
   "vars": {
     "ADMIN_USERS": "akar",
@@ -13,7 +15,7 @@
     "DEFAULT_IMAGE_MODEL": "2.5-sunburst",
     "GEMINI_MODEL": "gemini-3.1-pro-preview",
     "GEMINI_TRANSCRIBE_MODEL": "gemini-3.5-transcribe",
-    "MAX_UPLOAD_MB": "200"
+    "MAX_UPLOAD_MB": "25"
   }
   // Secrets (never put them here): KIE_API_KEY, GEMINI_API_KEY, ACCESS_TOKENS, SIGNING_SECRET
   // npx wrangler secret put KIE_API_KEY

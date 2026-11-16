@@ -2,7 +2,7 @@ import { randomId, sign, verify } from "./auth";
 import type { Ctx, Env } from "./env";
 
 /**
- * Files live in R2 under files/<id>/<filename>. The id is a long random value, so the
+ * Files live in storage (R2 or KV) under files/<id>/<filename>. The id is a long random value, so the
  * public link /f/<id>/<filename> cannot be guessed. Kie.ai needs public links to read
  * reference images, which is why files are served without a token.
  */
@@ -80,7 +80,7 @@ export async function importUrl(ctx: Ctx, url: string, filename?: string): Promi
   if (!res.ok || !res.body) throw new Error(`Could not download ${url} (HTTP ${res.status}).`);
   const max = maxUploadBytes(ctx.env);
   const len = Number(res.headers.get("content-length") ?? "0");
-  if (len > max) throw new Error(`File is larger than ${ctx.env.MAX_UPLOAD_MB ?? 200} MB.`);
+  if (len > max) throw new Error(`File is larger than ${ctx.env.MAX_UPLOAD_MB ?? 25} MB.`);
   const type = res.headers.get("content-type")?.split(";")[0] ?? "application/octet-stream";
   const name = filename ?? decodeURIComponent(new URL(url).pathname.split("/").pop() || "file");
   // R2 needs a known length for streams; buffer when the server does not send one.
@@ -90,7 +90,7 @@ export async function importUrl(ctx: Ctx, url: string, filename?: string): Promi
 }
 
 export function maxUploadBytes(env: Env) {
-  return Number(env.MAX_UPLOAD_MB ?? "200") * 1024 * 1024;
+  return Number(env.MAX_UPLOAD_MB ?? "25") * 1024 * 1024;
 }
 
 /** Signed one-time-ish upload link, valid for 30 minutes. */
@@ -143,8 +143,7 @@ export async function handleFile(req: Request, env: Env, url: URL): Promise<Resp
   const m = url.pathname.match(/^\/f\/([A-Za-z0-9_\-]{16,})\/([^/]+)$/);
   if (!m) return new Response("Not found", { status: 404 });
   const key = fileKey(m[1], decodeURIComponent(m[2]));
-  const range = req.headers.get("range");
-  const obj = await env.FILES.get(key, range ? { range: req.headers } : undefined);
+  const obj = await env.FILES.get(key);
   if (!obj) return new Response("Not found", { status: 404 });
   const headers = new Headers();
   obj.writeHttpMetadata(headers);
@@ -153,7 +152,7 @@ export async function handleFile(req: Request, env: Env, url: URL): Promise<Resp
   headers.set("x-content-type-options", "nosniff");
   headers.set("content-security-policy", "default-src 'none'; img-src 'self'; media-src 'self'");
   if (req.method === "HEAD") return new Response(null, { headers });
-  return new Response(obj.body, { status: range ? 206 : 200, headers });
+  return new Response(obj.body, { status: 200, headers });
 }
 
 // ---------- small JSON documents (styles, usage) ----------

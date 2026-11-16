@@ -2,6 +2,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { tokenFromRequest, userForToken } from "./auth";
 import type { Ctx, Env } from "./env";
 import { buildServer } from "./server";
+import { kvBucket } from "./kvstore";
+import { handleSetup, withSavedKeys } from "./setup";
 import { handleFile, handleUpload } from "./storage";
 
 const SECURITY_HEADERS = {
@@ -10,8 +12,9 @@ const SECURITY_HEADERS = {
 };
 
 export default {
-  async fetch(req: Request, env: Env, ectx: ExecutionContext): Promise<Response> {
+  async fetch(req: Request, baseEnv: Env, ectx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+    let env: Env = baseEnv.FILES ? baseEnv : { ...baseEnv, FILES: kvBucket(baseEnv.STORE!) };
     const p = url.pathname;
 
     if (p === "/" || p === "/health") {
@@ -19,6 +22,7 @@ export default {
     }
     if (p.startsWith("/f/")) return handleFile(req, env, url);
     if (p.startsWith("/u/")) return handleUpload(req, env, url);
+    if (p.startsWith("/setup/")) return handleSetup(req, env, url);
 
     if (p === "/mcp" || p.startsWith("/mcp/")) {
       const user = userForToken(env, tokenFromRequest(req, url));
@@ -30,6 +34,7 @@ export default {
           headers: { "content-type": "application/json", ...SECURITY_HEADERS },
         });
       }
+      env = await withSavedKeys(env);
       const ctx: Ctx = { env, user, origin: url.origin, waitUntil: (pr) => ectx.waitUntil(pr) };
       const server = buildServer(ctx);
       // Stateless: a fresh server + transport per request. All state lives in R2.
