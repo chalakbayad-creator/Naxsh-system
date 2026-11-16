@@ -404,6 +404,11 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         speakers: z.boolean().optional().describe("Label different speakers (default false)"),
         keep_fillers: z.boolean().optional().describe("Keep um/uh, repetitions (default false)"),
         verify: z.boolean().optional().describe("Second listening pass that corrects the draft (default true, more accurate, slower)"),
+        quality: z
+          .enum(["best", "standard"])
+          .optional()
+          .describe("best (default): several models transcribe independently and a final editor pass decides every word by listening again — most accurate, ~1–3 min. standard: one model + one review, faster."),
+        model: z.string().optional().describe("Admin only: force one Gemini model for testing."),
         engine: z
           .enum(["auto", "model", "speech"])
           .optional()
@@ -423,6 +428,8 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         speakers: a.speakers ?? false,
         keep_fillers: a.keep_fillers ?? false,
         verify: a.verify ?? true,
+        quality: a.quality ?? "best",
+        model: ctx.user.admin ? a.model : undefined,
         offset_seconds: a.offset_seconds ?? 0,
         max_segment_seconds: a.max_segment_seconds ?? 6,
         max_chars: a.max_chars ?? 42,
@@ -485,7 +492,13 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
           }
         }
         if (useModelEngine) {
-          const r = await transcribeWithModel(ctx, gfile, o);
+          const speechCandidate =
+            o.quality === "best" && !o.model
+              ? transcribeWithSpeechModel(ctx, gfile, o)
+                  .then((r) => (r.segments.length ? { segments: r.segments, text: r.text, tokens: r.tokens } : null))
+                  .catch(() => null)
+              : undefined;
+          const r = await transcribeWithModel(ctx, gfile, o, speechCandidate);
           tokens = r.tokens;
           usedModel = r.model;
           okRun = true;
@@ -493,6 +506,7 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
           language = r.language;
           model = r.model;
           passes = r.passes;
+          note = note || `models: ${r.models_used.join(" + ")}`;
         }
         segments = cleanSegments(segments, o.offset_seconds);
         const srt = toSrt(segments, o.speakers);

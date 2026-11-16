@@ -25,6 +25,10 @@ export interface TranscribeOptions {
   offset_seconds: number;
   max_segment_seconds: number;
   max_chars: number;
+  /** "best" = several models + an editor pass (default); "standard" = one model + review. */
+  quality?: "best" | "standard";
+  /** Force one Gemini model (admin testing). */
+  model?: string;
 }
 
 const LANG_NAMES: Record<string, string> = {
@@ -239,65 +243,128 @@ function parseSegments(raw: string): { language: string; segments: Segment[] } {
   return { language: j.language ?? "", segments: segs };
 }
 
-export async function transcribeWithModel(
-  ctx: Ctx,
-  file: { uri: string; mimeType: string },
-  o: TranscribeOptions,
-): Promise<{ language: string; segments: Segment[]; model: string; passes: number; tokens: number }> {
-  const audioPart = { file_data: { mime_type: file.mimeType, file_uri: file.uri } };
-  const config = { response_mime_type: "application/json", response_schema: SCHEMA, max_output_tokens: 65536 };
-
-  // Try the preferred model first; on a quota / access / overload error move to the next one.
-  // (A free-tier key has 0 quota for Pro models but works with Flash models.)
-  const chain = modelChain(ctx);
-  let model = chain[0];
-  let draftResp: any;
+/** Calls the first model in `models` that accepts the request. */
+async function callFirst(ctx: Ctx, models: string[], body: unknown): Promise<{ resp: any; model: string }> {
   const tried: string[] = [];
-  for (const m of chain) {
+  for (const m of models) {
     try {
-      draftResp = await generate(ctx, m, {
-        system_instruction: { parts: [{ text: systemPrompt(o) }] },
-        contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }] }],
-        generation_config: config,
-      });
-      model = m;
-      break;
+      return { resp: await generate(ctx, m, body), model: m };
     } catch (e) {
       tried.push(`${m}: ${String((e as Error).message).slice(0, 160)}`);
       if (!isSkippable(e)) throw e;
     }
   }
-  if (!draftResp) throw new Error(`No Gemini model accepted the request:\n${tried.join("\n")}`);
-  let result = parseSegments(textOf(draftResp));
-  let passes = 1;
-  const toks = (r: any) => Number(r?.usageMetadata?.totalTokenCount ?? 0);
-  let tokens = toks(draftResp);
+  throw new Error(`No Gemini model accepted the request:\n${tried.join("\n")}`);
+}
 
-  if (o.verify && result.segments.length) {
-    const review = `Here is a DRAFT transcript of this audio (JSON). Listen to the WHOLE audio again, very carefully, and return the corrected transcript in the same JSON schema.
+const toks = (r: any) => Number(r?.usageMetadata?.totalTokenCount ?? 0);
+const textLen = (segs: Segment[]) => segs.reduce((n, s) => n + s.text.length, 0);
+
+/**
+ * Careful transcription with a general Gemini model.
+ * - standard: one transcription + one listening review pass.
+ * - best (default): two different models transcribe independently, Google's speech model adds
+ *   word timings, then a final pass listens to the audio again and decides every word where
+ *   the candidates disagree (like a human editor comparing several drafts).
+ */
+export async function transcribeWithModel(
+  ctx: Ctx,
+  file: { uri: string; mimeType: string },
+  o: TranscribeOptions,
+  speechCandidate?: Promise<{ segments: Segment[]; text: string; tokens: number } | null>,
+): Promise<{ language: string; segments: Segment[]; model: string; passes: number; tokens: number; models_used: string[] }> {
+  const audioPart = { file_data: { mime_type: file.mimeType, file_uri: file.uri } };
+  const config = { response_mime_type: "application/json", response_schema: SCHEMA, max_output_tokens: 65536 };
+  const system = { parts: [{ text: systemPrompt(o) }] };
+  const chain = o.model ? [o.model] : modelChain(ctx);
+  const draftBody = { system_instruction: system, contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }] }], generation_config: config };
+
+  // Draft A from the strongest model that works.
+  const a = await callFirst(ctx, chain, draftBody);
+  let tokens = toks(a.resp);
+  const draftA = parseSegments(textOf(a.resp));
+  const used = [a.model];
+
+  if (o.quality !== "best") {
+    let result = draftA;
+    let passes = 1;
+    if (o.verify && result.segments.length) {
+      const review = `Here is a DRAFT transcript of this audio (JSON). Listen to the WHOLE audio again, very carefully, and return the corrected transcript in the same JSON schema.
 Fix: misheard or missing words, words that were translated or "corrected" instead of written as spoken, wrong spelling/alphabet per the spelling rules, wrong speaker labels, and timestamps that do not match when the words are actually spoken. Do not shorten the transcript. If the draft is already correct, return it unchanged.
 
 DRAFT:
 ${JSON.stringify(result)}`;
+      try {
+        const fixed = await generate(ctx, a.model, { ...draftBody, contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }, { text: review }] }] });
+        tokens += toks(fixed);
+        const r2 = parseSegments(textOf(fixed));
+        if (r2.segments.length && textLen(r2.segments) >= textLen(result.segments) * 0.8) {
+          result = r2;
+          passes = 2;
+        }
+      } catch {
+        /* keep the draft */
+      }
+    }
+    return { ...result, model: a.model, passes, tokens, models_used: used };
+  }
+
+  // Draft B from a different model (independent errors), plus the speech model's timings.
+  const rest = chain.slice(chain.indexOf(a.model) + 1);
+  const [b, speech] = await Promise.all([
+    rest.length ? callFirst(ctx, rest, draftBody).catch(() => null) : Promise.resolve(null),
+    speechCandidate ?? Promise.resolve(null),
+  ]);
+  const candidates: { label: string; source: string; segments: Segment[] }[] = [{ label: "A", source: a.model, segments: draftA.segments }];
+  if (b) {
+    tokens += toks(b.resp);
     try {
-      const fixed = await generate(ctx, model, {
-        system_instruction: { parts: [{ text: systemPrompt(o) }] },
-        contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }, { text: review }] }],
-        generation_config: config,
-      });
-      tokens += toks(fixed);
-      const r2 = parseSegments(textOf(fixed));
-      // Guard against a review pass that drops most of the text.
-      const len = (r: typeof result) => r.segments.reduce((n, s) => n + s.text.length, 0);
-      if (r2.segments.length && len(r2) >= len(result) * 0.8) {
-        result = r2;
-        passes = 2;
+      const d = parseSegments(textOf(b.resp));
+      if (d.segments.length) {
+        candidates.push({ label: "B", source: b.model, segments: d.segments });
+        used.push(b.model);
       }
     } catch {
-      /* keep the draft */
+      /* ignore a broken candidate */
     }
   }
-  return { ...result, model, passes, tokens };
+  if (speech?.segments.length) {
+    tokens += speech.tokens;
+    candidates.push({ label: candidates.length === 1 ? "B" : "C", source: "speech recognizer (precise word timing, weaker spelling)", segments: speech.segments });
+    used.push("speech");
+  }
+
+  const fmt = (segs: Segment[]) => segs.map((s) => `[${s.start.toFixed(2)}–${s.end.toFixed(2)}] ${s.text}`).join("\n");
+  const merge = `You are the final editor. Below are ${candidates.length} independent transcripts of THIS audio, made by different systems. They contain mistakes, and some may contain invented sentences.
+
+${candidates.map((c) => `### Candidate ${c.label} (${c.source})\n${fmt(c.segments)}`).join("\n\n")}
+
+Your job: listen to the WHOLE audio yourself, slowly, word by word, and write the one correct transcript.
+- Where the candidates agree and the audio confirms it, keep it.
+- Where they disagree, decide ONLY by what you hear. Never pick a phrase because it sounds more fluent or more formal; the speaker's own words win.
+- If every candidate is wrong somewhere, write what is actually said.
+- Make sure nothing at the start or the end of the audio is missing, and nothing is added that is not spoken.
+- Timing: the speech recognizer's timings (if present) are precise; use them to place segment starts/ends.
+- Follow all spelling and timing rules. Return the full transcript in the JSON schema.`;
+
+  let final = draftA;
+  let passes = candidates.length;
+  try {
+    const m = await callFirst(ctx, [a.model, ...rest], {
+      ...draftBody,
+      contents: [{ role: "user", parts: [audioPart, { text: userPrompt(o) }, { text: merge }] }],
+    });
+    tokens += toks(m.resp);
+    const r = parseSegments(textOf(m.resp));
+    const longest = Math.max(...candidates.map((c) => textLen(c.segments)));
+    if (r.segments.length && textLen(r.segments) >= longest * 0.75) {
+      final = r;
+      passes += 1;
+    }
+  } catch {
+    /* keep draft A */
+  }
+  return { ...final, model: a.model, passes, tokens, models_used: used };
 }
 
 // ---------------- Engine 2: Google's dedicated speech model (gemini-3.5-transcribe) ----------------
@@ -389,6 +456,7 @@ function secs(v: unknown): number {
 function groupWords(words: { start: number; end: number; speaker?: string; word: string }[], o: TranscribeOptions): Segment[] {
   const out: Segment[] = [];
   let cur: Segment | null = null;
+  words = [...words].filter((w) => Number.isFinite(w.start)).sort((x, y) => x.start - y.start);
   for (const w of words) {
     if (!Number.isFinite(w.start) || !w.word) continue;
     const breakHere =
