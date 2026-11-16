@@ -18,6 +18,7 @@
     "GEMINI_MODEL": "gemini-4-argon",
     "GEMINI_FALLBACK_MODELS": "gemini-4-carbon,gemini-4-hydrogen,gemini-3.1-pro-preview,gemini-3.8-flash,gemini-3.5-flash",
     "GEMINI_TRANSCRIBE_MODEL": "gemini-3.5-transcribe",
+    "ART_DIRECTOR_MODELS": "gpt-5.6-sol,gpt-5.5,gpt-5.4",
     "MAX_UPLOAD_MB": "25",
     "CREDITS_PER_USD": "200"
   }

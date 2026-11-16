@@ -36,25 +36,27 @@ In a ChatGPT chat, earlier images stay in the conversation, so the model sees th
 - To change one thing in a design: `image_edit(images=[that design], style=project, prompt=<the user's change, in their words> + "Keep everything else exactly as it is.")`.
 
 ## Running several images at once
-Start each job with `wait_seconds: 0` (returns a `task_id` at once), then call `image_result` for each task until all are done. Download every image with curl and look at each one before sending.
+`design_options` / `design_frames` run many designs in one background job. For plain `image_edit` jobs, start each with `wait_seconds: 0` (returns a `task_id` at once), then call `image_result` for each until all are done. Download every image with curl and look at each one before sending.
 
 ## Motion-graphics workflow without ChatGPT
 Follow `motion-graphics-gpt-design` exactly (analysis, scenes, key frames, the 2A/2B prompts with NO design description, checks, extraction, animation), with these replacements:
 
 **Transcript:** if the user sent no SRT, make it with `transcribe` (above) and show it for a quick check before planning.
 
+**Why not plain `image_edit` for designs:** in ChatGPT, the chat model (GPT-5.x) first looks at the frame, plans the design and writes a long detailed prompt for the image tool. A bare image call skips that and gives a generic sticker/template look. `design_options` and `design_frames` restore that step: a GPT chat model is the art director, GPT Image renders. Always use them for video designs.
+
 **Step 2A: five style options on ONE frame (always, for every new video).**
 1. Pick the most representative key frame (usually frame 1) and upload it.
-2. Make 5 designs of that frame, ONE AFTER ANOTHER, each with `image_edit(images=[key frame], prompt = 2A general prompt + that frame's 2B prompt, aspect_ratio = frame ratio, resolution "2K", project=<video name>, avoid_images=[all options made so far])`. Option 1 has no `avoid_images`; option 2 avoids option 1; option 5 avoids options 1–4. The server tells GPT to choose a completely different style of its own each time. Do NOT add any style words.
-3. Look at all 5. If two clearly share the same style, remake the later one once (same call, both in `avoid_images`).
-4. Send all 5 together in one message (SendUserFile), numbered 1–5, with no style descriptions or recommendations from Claude. Ask: "کام ستایلە؟" and wait.
+2. `design_options(frame, brief, count=5, aspect_ratio=<frame ratio>, resolution="2K", project=<video name>)`. The `brief` is the 2A general prompt + that frame's 2B prompt (transcript, goal, message, the frame's on-screen text, timing, burned-in overlays to keep). NO style words. GPT invents 5 completely different directions itself.
+3. Poll `design_result(job_id)` until done (2–5 min; tell the user once it is working).
+4. Download all 5, look at each, send them all together in one message (SendUserFile), numbered 1–5, with GPT's direction name only — no opinion or recommendation from Claude. Ask: "کام ستایلە؟" and wait.
 5. The chosen option → `style_save(<video name>, add_refs=[chosen design])`.
 
 **Step 2B: all remaining frames together.**
-1. Start one `image_edit` per remaining frame at once (`wait_seconds: 0`): `images=[key frame n]`, `style=<video name>`, `prompt` = that frame's 2B prompt only, same aspect ratio and resolution, `project=<video name>`. The chosen design is the style reference; each frame gets its own new layout in the same style.
-2. Poll every task with `image_result` until all are done. Check each against its key frame (Step 3 of the motion skill). Remake a frame only if it broke a fixed rule (changed the photo, wrong text, clearly another style), at most once.
-3. Send ALL frames together in one message, in order, with one short line per frame (frame number and time). Ask the user to approve or tell what to change.
-4. Changes: only the frames and only the things the user names, with the user's own words (see "To change one thing" above). Send the changed frames back together. When the user approves, add every approved frame to the style and continue.
+1. `design_frames(style=<video name>, frames=[{image, brief, label}...], aspect_ratio, resolution="2K", project=<video name>)` with every remaining key frame and its 2B brief (no style words). GPT sees each frame + the chosen design and writes a new composition in the same design system; all render in parallel.
+2. Poll `design_result(job_id)` until done. Check each frame (Step 3 of the motion skill).
+3. Send ALL frames together in one message, in order, one short line per frame (number and time). Ask the user to approve or say what to change.
+4. Changes: only the frames and things the user names: `image_edit(images=[that design], style=<video name>, prompt=<the user's words> + "Keep everything else exactly as it is.")`. Send the changed frames back together. On approval, add every approved frame to the style and continue.
 
 **Step 3 (check):** unchanged (the API may also alter the photo: measure and report as the skill says).
 

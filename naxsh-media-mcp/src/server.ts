@@ -12,7 +12,8 @@ import {
   type Segment,
   type TranscribeOptions,
 } from "./gemini";
-import { jobStatus, startTranscriptionJob } from "./jobs";
+import { designDirections } from "./artdirector";
+import { jobStatus, startDesignJob, startTranscriptionJob } from "./jobs";
 import { logImageEnd, logImageStart, logTranscription } from "./log";
 import { createImageTask, getImageTask, IMAGE_MODELS, waitForImage, type ImageVersion, type TaskResult } from "./kie";
 import {
@@ -68,7 +69,7 @@ function styleKey(ctx: Ctx, name: string) {
   return `styles/${ctx.user.name}/${slug}.json`;
 }
 
-async function loadStyle(ctx: Ctx, name: string): Promise<Style> {
+export async function loadStyle(ctx: Ctx, name: string): Promise<Style> {
   const s = await getJson<Style>(ctx.env, styleKey(ctx, name));
   if (!s) throw new Error(`No saved style named "${name}". Use style_list to see saved styles.`);
   return s;
@@ -478,6 +479,102 @@ Transcription: send audio only (extract with ffmpeg: -vn -ac 1 -ar 16000 -c:a fl
         await new Promise((r) => setTimeout(r, Math.min(3000, Math.max(0, until - Date.now()))));
       }
     }),
+  );
+
+  // ---------------- art-directed designs (GPT plans, GPT Image renders) ----------------
+
+  const jobPoll = async (job_id: string, wait_seconds?: number) => {
+    const until = Date.now() + (wait_seconds ?? 40) * 1000;
+    for (;;) {
+      const st = await jobStatus(ctx, job_id);
+      if (st.status !== "running" || Date.now() >= until) {
+        if (st.status === "done") return st.result;
+        if (st.status === "error") throw new Error(`Job failed: ${st.error}`);
+        return {
+          status: "running",
+          job_id,
+          elapsed_seconds: Math.round((Date.now() - Date.parse(st.started)) / 1000),
+          next: "Still working. Call the same result tool again with this job_id.",
+        };
+      }
+      await new Promise((r) => setTimeout(r, Math.min(3000, Math.max(0, until - Date.now()))));
+    }
+  };
+
+  server.registerTool(
+    "design_options",
+    {
+      title: "Design style options for one frame (GPT art director)",
+      description:
+        "Like designing in ChatGPT: a GPT chat model looks at the frame and the brief, invents N completely different premium design directions and writes a detailed prompt for each; GPT Image renders them. GPT decides every style; pass only the brief (content, text, goal, rules) — no style words. Runs in the background: returns job_id; then call design_result.",
+      inputSchema: {
+        frame: z.string().describe("file_id or link of the key frame"),
+        brief: z.string().describe("The project brief for GPT: transcript/goal/message, the frame's on-screen text, timing and fixed rules. No style descriptions."),
+        count: z.number().int().min(1).max(6).optional().describe("Number of different directions (default 5)"),
+        dry_run: z.boolean().optional().describe("Admin only: return GPT's design prompts without rendering."),
+        aspect_ratio: aspect,
+        resolution,
+        project: projectArg,
+      },
+    },
+    wrap(async (a) => {
+      const count = a.count ?? 5;
+      if (a.dry_run && ctx.user.admin) return designDirections(ctx, resolveToUrl(ctx, a.frame), a.brief, count);
+      await spend(ctx, "images", count);
+      const job = await startDesignJob(ctx, {
+        kind: "options",
+        frame: a.frame,
+        brief: a.brief,
+        count,
+        aspect_ratio: a.aspect_ratio,
+        resolution: a.resolution,
+        project: a.project,
+      });
+      return { status: "started", job_id: job, next: "Call design_result with this job_id until it is done (usually 2–5 minutes)." };
+    }),
+  );
+
+  server.registerTool(
+    "design_frames",
+    {
+      title: "Design many frames in the chosen style (GPT art director)",
+      description:
+        "After the user picks a style (saved with style_save), designs all remaining frames at once: for each frame a GPT chat model sees the frame + the approved design(s) and writes the prompt for the same design system with a new composition; GPT Image renders them in parallel. Background job: returns job_id; then call design_result.",
+      inputSchema: {
+        style: z.string().describe("Saved style name (holds the chosen design)"),
+        frames: z
+          .array(z.object({ image: z.string(), brief: z.string(), label: z.string().optional() }))
+          .min(1)
+          .max(12)
+          .describe("Each frame: key frame file_id/link + its brief (on-screen text, goal, message, timing). No style words."),
+        aspect_ratio: aspect,
+        resolution,
+        project: projectArg,
+      },
+    },
+    wrap(async (a) => {
+      await loadStyle(ctx, a.style);
+      await spend(ctx, "images", a.frames.length);
+      const job = await startDesignJob(ctx, {
+        kind: "frames",
+        style: a.style,
+        frames: a.frames,
+        aspect_ratio: a.aspect_ratio,
+        resolution: a.resolution,
+        project: a.project,
+      });
+      return { status: "started", job_id: job, next: "Call design_result with this job_id until it is done (usually 2–6 minutes)." };
+    }),
+  );
+
+  server.registerTool(
+    "design_result",
+    {
+      title: "Get design job results",
+      description: "Waits (up to ~40 s per call) for a design_options / design_frames job and returns all image links when done. Call again while status is running.",
+      inputSchema: { job_id: z.string(), wait_seconds: z.number().int().min(0).max(45).optional() },
+    },
+    wrap(async ({ job_id, wait_seconds }) => jobPoll(job_id, wait_seconds)),
   );
 
   // ---------------- status ----------------

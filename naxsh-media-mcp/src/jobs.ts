@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { randomId } from "./auth";
 import type { Ctx, Env, User } from "./env";
 import { kvBucket } from "./kvstore";
+import { runDesign, type DesignArgs } from "./design";
 import { runTranscription, type TranscribeArgs } from "./server";
 import { withSavedKeys } from "./setup";
 import { spend } from "./storage";
@@ -17,7 +18,8 @@ interface JobRecord {
   id: string;
   user: User;
   origin: string;
-  args: TranscribeArgs;
+  kind?: "transcribe" | "design";
+  args: TranscribeArgs | DesignArgs;
   status: "running" | "done" | "error";
   started: string;
   finished?: string;
@@ -47,12 +49,13 @@ export class Jobs extends DurableObject<Env> {
     env = await withSavedKeys(env);
     const ctx: Ctx = { env, user: job.user, origin: job.origin, waitUntil: (p) => this.ctx.waitUntil(p) };
     try {
-      job.result = await runTranscription(ctx, job.args);
+      job.result =
+        job.kind === "design" ? await runDesign(ctx, job.args as DesignArgs) : await runTranscription(ctx, job.args as TranscribeArgs);
       job.status = "done";
     } catch (e) {
       job.status = "error";
       job.error = String((e as Error)?.message ?? e).slice(0, 1500);
-      await spend(ctx, "transcribe", -1).catch(() => {});
+      if (job.kind !== "design") await spend(ctx, "transcribe", -1).catch(() => {});
     }
     job.finished = new Date().toISOString();
     await this.ctx.storage.put({ job, cleanup: true });
@@ -78,8 +81,22 @@ export async function startTranscriptionJob(ctx: Ctx, args: TranscribeArgs): Pro
   return id;
 }
 
+export async function startDesignJob(ctx: Ctx, args: DesignArgs): Promise<string> {
+  const id = `ds_${randomId(12)}`;
+  await stub(ctx.env, id).start({
+    id,
+    kind: "design",
+    user: ctx.user,
+    origin: ctx.origin,
+    args,
+    status: "running",
+    started: new Date().toISOString(),
+  });
+  return id;
+}
+
 export async function jobStatus(ctx: Ctx, jobId: string): Promise<JobRecord> {
-  if (!/^tr_[A-Za-z0-9_\-]{8,}$/.test(jobId)) throw new Error("Unknown job_id.");
+  if (!/^(tr|ds)_[A-Za-z0-9_\-]{8,}$/.test(jobId)) throw new Error("Unknown job_id.");
   const j = await stub(ctx.env, jobId).status();
   if (!j || j.user.name !== ctx.user.name) throw new Error("Unknown job_id.");
   return j;

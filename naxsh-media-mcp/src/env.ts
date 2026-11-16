@@ -28,6 +28,8 @@ export interface Env {
   GEMINI_MODEL?: string;
   /** Models tried in order when GEMINI_MODEL is refused (quota/access), comma-separated. */
   GEMINI_FALLBACK_MODELS?: string;
+  /** GPT chat models (via Kie.ai) that plan designs like ChatGPT does, comma-separated, tried in order. */
+  ART_DIRECTOR_MODELS?: string;
   /** Google's dedicated speech-to-text model. */
   GEMINI_TRANSCRIBE_MODEL?: string;
   /** Kie credits per US dollar, for the dashboard's $ estimates. */
